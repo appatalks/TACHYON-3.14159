@@ -35,17 +35,21 @@ speedups remain meaningful but absolute times will improve on re-measurement.
 | y-cruncher v0.8.7.9547 (fresh, this host, 2026-11-04) | 10M | 0.115 s | 32 | custom compute + verify, no disk write |
 | y-cruncher v0.8.7.9547 (fresh, this host, 2026-11-04) | 100M | 1.814 s | 32 | bench mode, incl. verify, no disk write |
 | y-cruncher v0.8.7.9547 (fresh, this host, 2026-11-04) | 1B | 27.97 s | 32 | bench mode, incl. verify, no disk write |
-| tachyon-pi (this work) | 1M | 0.106 s | 32 | E5a split + E6 convert (post BUG-2); no verify, no write |
-| tachyon-pi (this work) | 10M | 1.588 s | 32 | E5a split + E6 convert (post BUG-2); no verify, no write |
+| tachyon-pi (this work) | 1M | 0.095 s | 32 | E7c: pmulp + parallel split/convert; no verify, no write |
+| tachyon-pi (this work) | 10M | 1.117 s | 32 | E7c (median of 3, cooldown; phases 0.34/0.27/0.28/0.23) |
 | tachyon-pi (this work) | 100M | 62.8 s | 1 | exact integer arithmetic, no approximations (post BUG-1 fix) |
-| tachyon-pi (this work) | 100M | 25.4 s | 32 | E5a split + E6 convert (post BUG-2); --verify PASS (separate run) |
+| tachyon-pi (this work) | 100M | 25.4 s | 32 | E5a split + E6 convert (post BUG-2); superseded by E7c row below |
+| tachyon-pi (this work) | 100M | **20.48 s** | 32 | E7c (median of 3, cooldown, var <0.5 %; split 9.60, sqrt 3.66, final 3.81, convert 3.32; peak RSS 5.00 GB); --verify PASS 20.6–21.6 s |
+| tachyon-pi (this work) | 1B | 317.9 s | 32 | E7c first 1B run, --verify **PASS**; split 222.1, sqrt 48.0, final 47.8; peak RSS 29.2 GB; wall 9:51 incl. startup |
 
-Gap to y-cruncher @100M: **14.0x** at 32 threads (was 80x at 1 thread pre-fix; 17.0x pre-E6/BUG-2).
-Gap @10M 13.8x, @1M 9.7x. Note the y-cruncher figures *include* their verification pass
+Gap to y-cruncher @100M: **11.3x** at 32 threads (was 14.0x post-E6; 80x at 1 thread
+pre-fix; 17.0x pre-E6/BUG-2).
+Gap @10M 9.7x (was 13.8x), @1M 8.6x (was 9.7x), @1B 11.4x (first 1B run; y-cruncher's
+27.97 s incl. verify vs our 317.9 s incl. verify). Note the y-cruncher figures *include* their verification pass
 while tachyon totals exclude verification, so the true compute gap is slightly larger.
-Closing plan: parallelize convert/final-div/sqrt (61% of our 100M T32 time is these three
-single-threaded phases), concurrent CPU+GPU execution (E5b), cost-balanced split (E5c),
-transform-reuse DAG (H3).
+Closing plan: E8 parallel AVX-512 FFT multiplication (split phase is now 47 % of total
+and mul-bound with single-threaded GMP FFT), concurrent CPU+GPU execution (E5b),
+cost-balanced split (E5c), transform-reuse DAG (H3).
 
 ### y-cruncher re-benchmark conditions (fresh bars)
 

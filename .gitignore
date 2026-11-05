@@ -3,3 +3,7 @@ dbg/
 *.o
 *.a
 .cache/
+tachyon-pi
+tail-test
+tachyon-httpd
+pi-client

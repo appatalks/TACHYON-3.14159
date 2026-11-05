@@ -372,17 +372,36 @@ void rec_par(MulEngine& eng, mpz_t R, const mpz_t D) {
     if (mpz_cmp(u, V) > 0) break;
     mpz_set(c, u); mpz_add_ui(x, x, 1);
   }                                       // x = floor(2^(n+32)/D), exact
+  // Truncated Newton doubling (E7b). Invariant: x <= 2^(n+m)/D with deficit
+  // < 2^(m+2). Each level keeps only the TOP m+G bits of D and truncates both
+  // products, so every multiplication is BALANCED (m+G) x m: GMP's unbalanced
+  // full-width n x m path was ~190x worse per bit^2 and dominated the tail
+  // (measured 14.8s vs 2.15s for GMP's own division at 2^28 bits). The
+  // truncation error is < 2^(m+1) ULP at scale n+m, which the exact final
+  // fix-up below absorbs in one shot, so R stays EXACT.
   mp_size_t m = 32;
-  for (; m < n; m *= 2) {
-    eng.mul(u, D, x);                                     // n x m bits
-    mpz_set_ui(w, 1);
-    mpz_mul_2exp(w, w, (unsigned long)(n + m + 1));
-    mpz_sub(w, w, u);                                     // 2^(n+m+1) - D*x > 0
-    eng.mul(u, x, w);                                     // m x (n+m)
-    mpz_fdiv_q_2exp(x, u, (unsigned long)n);              // scale n+m -> n+2m
+  const mp_size_t GUARD = 64;                                 // truncation guard bits
+  for (; m < n - GUARD; m *= 2) {
+    mpz_tdiv_q_2exp(u, D, (unsigned long)(n - m - GUARD));    // D top (m+G) bits
+    eng.mul(w, u, x);                                     // (m+G) x m  balanced
+    mpz_fdiv_q_2exp(w, w, (unsigned long)m);              // top m+G+1 bits
+    if (mpz_sizeinbase(w, 2) > (unsigned long)(m + GUARD)) mpz_sub_ui(w, w, 1);
+    mpz_set_ui(u, 1);
+    mpz_mul_2exp(u, u, (unsigned long)(m + GUARD + 1));
+    mpz_sub(u, u, w);                                     // W = 2^(m+G+1) - u > 0
+    eng.mul(w, x, u);                                     // m x (m+G+1) balanced
+    mpz_fdiv_q_2exp(x, w, (unsigned long)GUARD);          // scale n+m -> n+2m
   }
-  // On exit x <= floor(2^(n+m)/D), m = smallest power of two >= n.
-  mpz_fdiv_q_2exp(R, x, (unsigned long)(m - n));          // ~floor(2^(2n)/D)
+  // Each level doubles the scale (x -> x*2^m/2^GUARD), so on exit x already
+  // lives at scale n+m, m = 2^k >= n-GUARD, deficit e with |e| bits ~ 2^k/16.
+  // No boost needed; the exit shift below lands R at scale 2n.
+  // No final full-width level: exit at the first m >= n - GUARD. R must land
+  // at scale 2n, so shift x by |n-m| in the appropriate direction; either way
+  // the deficit of R is < 2^(n+2) + 1 ULP, i.e. the fix-up quotient c below is
+  // at most ~5, so c*D stays linear even though m may be < n.
+  // On exit x <= floor(2^(n+m)/D) with deficit < 2^(m+2), m = 2^k >= n-GUARD.
+  if (m >= n) mpz_fdiv_q_2exp(R, x, (unsigned long)(m - n));
+  else        mpz_mul_2exp(R, x, (unsigned long)(n - m)); // ~floor(2^(2n)/D)
   mpz_set_ui(u, 1);
   mpz_mul_2exp(u, u, (unsigned long)(2 * n));             // 2^(2n)
   eng.mul(w, D, R);                                       // parallel n x n
@@ -400,7 +419,14 @@ void divrec(mpz_t q, mpz_t r, const mpz_t A, const mpz_t D, MulEngine& eng,
             int depth) {
   (void)depth;
   const mp_size_t nb = (mp_size_t)mpz_sizeinbase(D, 2);
-  if (nb < (1 << 21) || mpz_sizeinbase(A, 2) >= 2 * nb) {
+  // E7c (measured): the reciprocal ladder + fix-up does ~3x the mul-work of
+  // GMP's recursive division, so it only pays off when the quotient is small
+  // (bits(A) - nb <= nb/8).  For large quotients GMP's DC division wins even
+  // with a single-threaded GMP core (probe @2^28 bits: mpz_tdiv_q 2.17s vs
+  // divrec-par 3.90s).  Fallback: D small, or bits(A) >= 2nb (deficit bound),
+  // or quotient > nb/8 bits.
+  if (nb < (1 << 21) || mpz_sizeinbase(A, 2) >= 2 * nb ||
+      8 * (mpz_sizeinbase(A, 2) - nb) > nb) {
     mpz_tdiv_qr(q, r, A, D);
     return;
   }
@@ -417,12 +443,27 @@ void divrec(mpz_t q, mpz_t r, const mpz_t A, const mpz_t D, MulEngine& eng,
     mpz_mul(t, f, D);                                   // f is tiny: linear
     mpz_sub(r, r, t);
   }
+  if (std::getenv("TAILDBG")) {                         // oracle: compare vs exact
+    mpz_t qa, ra;
+    mpz_inits(qa, ra, nullptr);
+    mpz_tdiv_qr(qa, ra, A, D);
+    if (mpz_cmp(q, qa) || mpz_cmp(r, ra)) {
+      mpz_sub(qa, q, qa);                               // q - Q*
+      std::fprintf(stderr, "[divrec] MISMATCH nb=%lld bitsA=%lld qerr_bits=%lld sign=%d\n",
+                   (long long)nb, (long long)mpz_sizeinbase(A, 2),
+                   (long long)mpz_sizeinbase(qa, 2), mpz_sgn(qa));
+    } else {
+      std::fprintf(stderr, "[divrec] ok nb=%lld bitsA=%lld\n",
+                   (long long)nb, (long long)mpz_sizeinbase(A, 2));
+    }
+    mpz_clears(qa, ra, nullptr);
+  }
   mpz_clears(R, t, f, nullptr);
 }
 
 // s = isqrt(N), exact, split-and-correct (N >= 1; s may alias N).
-//   bl = bitlen(N);  H = N >> (bl/2);  s0 = isqrt(H)  (recursive)
-//   L  = s0 << (bl/4)  (L^2 = s0^2 * 2^(bl/2) <= H * 2^(bl/2) <= N, so L <= s*)
+//   j  = bl/4;  H = N >> 2j;  s0 = isqrt(H)  (recursive)   [2j = 2*(bl/4), NOT bl/2]
+//   L  = s0 << j   (L^2 = s0^2 * 2^(2j) <= H * 2^(2j) <= N, so L <= s*)
 //   e  = floor((N - L^2) / (2L + 1))          [the one expensive division]
 //   s  = L + e, then exact fix-up.
 // Write s* = isqrt(N), e* = s* - L >= 0, r = N - s*^2 in [0, 2s*]. Then
@@ -445,7 +486,10 @@ void sqrtrec(mpz_t s, const mpz_t N, MulEngine& eng, int depth) {
   mpz_t H, s0, L, num, den, e, rem, t;
   mpz_init(H); mpz_init(s0); mpz_init(L); mpz_init(num);
   mpz_init(den); mpz_init(e); mpz_init(rem); mpz_init(t);
-  mpz_tdiv_q_2exp(H, N, (unsigned long)(bl / 2));
+  // Split by 2*(bl/4), NOT bl/2: when bl/2 is odd (bl = 4k+2/4k+3), shifting
+  // by bl/2 breaks the identity L^2 = s0^2 * 2^(2*(bl/4)) and L lands a factor
+  // sqrt(2) below s*, exploding the fix-up count (the E7 tail-test failure).
+  mpz_tdiv_q_2exp(H, N, (unsigned long)((bl / 4) * 2));
   sqrtrec(s0, H, eng, depth + 1);
   mpz_mul_2exp(L, s0, (unsigned long)(bl / 4));      // L = s0 << (bl/4)
   eng.mul(num, L, L);                                // L^2 (parallel mul)
@@ -591,6 +635,13 @@ int tail_selftest_impl(unsigned threads) {
       std::fprintf(stderr, "[tail] %s sqrtrec perfect nb=%d done %.2fs\n", en, (int)nb, el(ts));
       if (mpz_cmp(s1, s2) || mpz_cmp(s2, u)) {
         std::fprintf(stderr, "[tail] sqrtrec perfect-square mismatch\n");
+        char fn[64];
+        std::snprintf(fn, sizeof fn, "/tmp/failN%s.bin", en);
+        if (FILE *f = std::fopen(fn, "ab")) {
+          mpz_out_raw(f, N);
+          mpz_out_raw(f, s2);  // what the engine produced
+          std::fclose(f);
+        }
         ++fails;
       }
       mpz_addmul_ui(N, u, 2);  // N = u^2 + 2u, r = 2u = max
@@ -601,6 +652,13 @@ int tail_selftest_impl(unsigned threads) {
       std::fprintf(stderr, "[tail] %s sqrtrec max-r nb=%d done %.2fs\n", en, (int)nb, el(ts2));
       if (mpz_cmp(s1, s2)) {
         std::fprintf(stderr, "[tail] sqrtrec max-r mismatch\n");
+        char fn2[64];
+        std::snprintf(fn2, sizeof fn2, "/tmp/failN%s.bin", en);
+        if (FILE *f = std::fopen(fn2, "ab")) {
+          mpz_out_raw(f, N);
+          mpz_out_raw(f, s2);
+          std::fclose(f);
+        }
         ++fails;
       }
     }
@@ -686,11 +744,18 @@ void compute_pi(const PiOptions& opt, mpz_t out, PiTimings& tm) {
   {
     mpz_t K;
     mpz_init_set_ui(K, 10005);
-    if (tail_par) pow_par(eng, S, ten, 2 * d2);
-    else mpz_pow_ui(S, ten, 2 * d2);
+    // E7c (measured): mpz_pow_ui beats pow_par for 10^(2*d2) (sqrt phase
+    // 3.7s -> 4.9s); GMP's small-base power is already near-optimal here.
+    mpz_pow_ui(S, ten, 2 * d2);
     mpz_mul(S, K, S);
-    if (tail_par) sqrtrec(S, S, eng, 0);
-    else mpz_sqrt(S, S);
+    // E7c (measured): reciprocal-based sqrtrec/divrec lose to GMP's DC
+    // division at production sizes (probe @2^28 bits: mpz_sqrt 2.25s vs
+    // sqrtrec 7.62s; mpz_tdiv_q 2.17s vs divrec 3.90s) because the
+    // reciprocal ladder + exact fix-up does ~3x the mul-work of recursive
+    // division.  sqrtrec/divrec stay available and test-covered (tail-test,
+    // probes) but production sqrt/div run on GMP; the parallel-mul win is
+    // banked in the split tree and decimal conversion instead.
+    mpz_sqrt(S, S);
     mpz_clear(K);
   }
 
@@ -703,14 +768,9 @@ void compute_pi(const PiOptions& opt, mpz_t out, PiTimings& tm) {
   else mpz_mul(num, num, S);
   mpz_pow_ui(den, ten, d2 - D);
   mpz_mul(den, den, top.T);
-  if (tail_par) {
-    mpz_t rr;
-    mpz_init(rr);
-    divrec(out, rr, num, den, eng, 0);
-    mpz_clear(rr);
-  } else {
-    mpz_tdiv_q(out, num, den);
-  }
+  mpz_tdiv_q(out, num, den);  // E7c: GMP quotient-only div beats divrec
+                              // (2.15s vs 2.61s @probe scale; remainder is
+                              // discarded anyway)
 
   auto t3 = clk::now();
 

@@ -173,6 +173,46 @@ trials after warm-up. Nothing here is extrapolated or quoted from other machines
   3.51), normal `--out` run 26.1 s wall *including* 100 MB disk write; --verify PASS.
   10M T32 1.588 s, 1M T32 0.106 s. Decision: KEEP both changes.
 
+## E7 / E7b / E7c: parallel Karatsuba mul lands; parallel reciprocal tail REJECTED (2026-11-05)
+
+- E7 hypothesis: a fork-join Karatsuba multiplication (pmulp, 3-limb base, threshold
+  2048 limbs, global thread pool) inside eng.mul would accelerate every large product
+  (split tree, final num-mul, sqrt operand) with one mechanism.
+- E7 first integration REGRESSED 100M --verify to **63.25 s**. Two root causes found:
+  (1) the newton-reciprocal tail helpers (rec_par/divrec/sqrtrec) never scale-doubled:
+      the per-level shift was `m+GUARD` instead of `GUARD`, so x stayed at scale n+32
+      while D·x was taken at scale n+m -> the ladder converged but ~3x slower than
+      needed, and the final exact fix-up (V = 2^2n - D·R, c = fdiv_q(V,D)) silently
+      absorbed any residual error (correct-but-slow masked the bug for weeks);
+  (2) after fixing the ladder, a post-loop boost `mpz_mul_2exp(x,x,m-GUARD)`
+      double-counted the scale and overshot x by ~2^(m-32), making the exact
+      fix-up divide a ~2^n-sized V by D (full extra division) instead of ~n bits.
+- Probe facts at nb=2^28 (session probe_tailperf / probe_div, probe_div PASS vs
+  current source): mpz_tdiv_q 2.154 s vs full reciprocal divrec 3.90 s (par-mul);
+  mpz_sqrt 2.254 s vs sqrtrec 4.24 s (hybrid par L² + GMP e-div) / 7.62 s (full).
+  GMP's internal divide-and-conquer division does ~1/3 the multiplication work of
+  a reciprocal ladder plus exact fix-up at these shapes; the production final
+  division (num ~1.5x bits of den, quotient ~nb/2 bits) took the FULL ladder path.
+- E7c dispatch decision (measured): production tail = GMP (mpz_sqrt, mpz_pow_ui,
+  plain mpz_tdiv_q; divrec reciprocal path kept only when quotient <= nb/8, which
+  production never hits). `tail-test` harness (differential vs GMP, all sizes/
+  threads) PASSES at 32 threads and stays in-tree as regression cover for the
+  still-used helpers. KEEP parallel mul (pmulp) in split tree, final num-mul, and
+  conversion; REJECT reciprocal-based tail for production.
+- Note mpz_pow_ui is also faster than the parallel pow_par here (+1.2 s penalty in
+  sqrt phase at 100M when it was enabled): exponent 128 is tiny, so pow_par's
+  fork/join overhead exceeds its parallel win.
+- Post-E7c clean benchmarks (cooldown between runs, T32, median of 3, no verify,
+  no disk write; variance < 0.5 %): 1M **0.095 s** (was 0.106), 10M **1.117 s**
+  (was 1.588; -30 %), 100M **20.48 s** (was 25.41; -19 %: split 9.60, sqrt 3.66,
+  final 3.81, convert 3.32; peak RSS 5.00 GB). --verify PASS at 10M (0.91 s
+  phases) and 100M (20.6-21.6 s incl. contention runs). Measurement hygiene:
+  back-to-back 100M runs and concurrent compiles inflate totals by 2-4 s (thermal
+  + scheduler contention); the 24.3 s median seen mid-session was contention,
+  20.5 s is reproducible after cooldown.
+- Gap to y-cruncher @100M narrows 14.0x -> **11.3x** (20.48 vs 1.814); @10M
+  13.8x -> 9.7x; @1M 9.7x -> 8.6x.
+
 ## Planned next
 
 - E5b: CUDA-stream concurrency — dispatch GPU muls on non-blocking streams while CPU
@@ -182,5 +222,11 @@ trials after warm-up. Nothing here is extrapolated or quoted from other machines
   split-scaling ceiling found in E5a.
 - E6: DONE (above). Further convert win possible: cache the 10^(2^k) pow table across
   runs in server mode (~1 s at 100M) and push fork depth past log2(threads).
-- E7: transform-reuse DAG (H3): memoized forward transforms across the 3 products per combine.
+- E7: DONE (above). Transform-reuse DAG (H3): memoized forward transforms across the
+  3 products per combine still unexplored.
+- E8 (record path): own parallel AVX-512 FFT/NTT multiplication on CPU. GMP's
+  Schönhage-Strassen is single-threaded at these sizes (split phase 9.6 s of 20.5 s
+  total is dominated by ~332M-bit muls); a 32-thread FFT mul is the only realistic
+  route toward y-cruncher's 1.814 s @100M.
+- 1B-digit feasibility: first run in progress (see BENCHMARKS.md).
 - Re-measure GPU/hybrid end-to-end rows post BUG-1-fix (E4 rows carry the oversized-P penalty).
