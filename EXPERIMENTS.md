@@ -230,3 +230,6 @@ trials after warm-up. Nothing here is extrapolated or quoted from other machines
   route toward y-cruncher's 1.814 s @100M.
 - 1B-digit feasibility: first run in progress (see BENCHMARKS.md).
 - Re-measure GPU/hybrid end-to-end rows post BUG-1-fix (E4 rows carry the oversized-P penalty).
+  Partially done 2026-11-05: T1 200M/500M CPU-vs-GPU rows in BENCHMARKS.md (GPU parity at
+  200M, 3.8x loss at 500M past the N=2^24 NTT cap); T32 + hybrid rows still pending a
+  contention-free VRAM window.
