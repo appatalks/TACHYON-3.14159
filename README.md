@@ -5,9 +5,10 @@ platform for testing whether heterogeneous, hardware-aware computation graphs ca
 beat fixed-strategy big-integer pipelines. Target hardware: AMD Ryzen 9 9950X
 (16C/32T, AVX-512) + NVIDIA RTX 5070 Ti (16 GB) + 128 GB DDR5.
 
-Current best: **20.5 s @100M digits** and **318 s @1B digits** (BBP-verified),
-on a 16-core/32-thread CPU; a CUDA exact-NTT mul backend wins single-threaded
-by up to 1.8x below 30M digits. See `RESEARCH.md` (hypotheses + decision log),
+Current best: **17.78 s @100M digits** (CUDA backend, 32 threads; BBP-verified
+in a 17.48 s confirmation run) and **318 s @1B digits** (CPU, BBP-verified).
+A CUDA exact-NTT mul backend wins single-threaded by up to 1.8x below 30M
+digits. See `RESEARCH.md` (hypotheses + decision log),
 `EXPERIMENTS.md` (ledger), `BENCHMARKS.md` (numbers), `ARCHITECTURE.md`
 (design + error model).
 
@@ -98,13 +99,14 @@ Exactness model and guard-digit derivation: `ARCHITECTURE.md`.
 
 ## Records (same machine, medians of 3 after cooldown, all BBP-verified)
 
-Best per size (CPU, `--threads 32`, no verify/disk-write):
+Best measured per size (`--threads 32`; CPU rows are used for the y-cruncher
+comparison):
 
 | digits | TACHYON best | y-cruncher bar (same CPU) | gap |
 |---|---|---|---|
 | 1M | 0.095 s | 0.011 s | 8.6x |
 | 10M | 1.117 s | 0.115 s | 9.7x |
-| 100M | **20.48 s** (split 9.60, sqrt 3.66, final 3.81, convert 3.32) | 1.814 s | 11.3x |
+| 100M | **17.781 s** (GPU; CPU baseline 20.878 s) | 1.814 s | 9.8x |
 | 1B | **317.9 s** (verify PASS, peak RSS 29.2 GB) | 14.67 s | 21.7x |
 
 (y-cruncher also lists a 1.107 s @100M mode; we cite its conservative
