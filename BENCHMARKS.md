@@ -126,3 +126,44 @@ bookkeeping that production paths then duplicated; removed behind `PiOptions::ti
 (--benchmark only). 100M T32 total 30.9->25.4 s; `--out` wall 26.1 s *including* disk write.
 Remaining serial tail: sqrt 3.89 + final-div 5.18 (GMP, single-thread) = 36% of total;
 split spine 12.83 (3.6x scaling ceiling, E5c); convert serial remainder ~1.3 s.
+
+## E7c: GMP tail + parallel mul — current best (2026-11-05)
+
+`--threads 32`, cpu backend, median of 3 after cooldown, no verify, no disk write,
+variance < 0.5 %; peak RSS in parens:
+
+| digits | total s | split | sqrt | final | convert | RSS |
+|---|---|---|---|---|---|---|
+| 1M | **0.095** | — | — | — | — | — |
+| 10M | **1.117** | — | — | — | — | — |
+| 100M | **20.48** | 9.60 | 3.66 | 3.81 | 3.32 | 5.00 GB |
+| 1B | **317.9** (verify PASS) | — | — | — | — | 29.2 GB |
+
+Gap to the y-cruncher bar on this CPU narrows to 8.6x @1M, 9.7x @10M, **11.3x
+@100M** (20.48 vs 1.814 s); @1B the bar is 14.67 s (21.7x). `--verify` PASS at
+10M and 100M; 1B verified with the BBP digit check. See `EXPERIMENTS.md` E7/E7c
+for why the reciprocal-based tail was measured-and-rejected in favour of GMP.
+
+## E8 (in progress): GPU dispatch overlap + loaded-state CPU matrix (2026-11-05)
+
+Uncommitted work: thread-safe CUDA dispatch (internal mutex), per-prime buffers on
+3 non-blocking streams, pinned host staging, device-cached twiddle tables (~25 ms
+saved per 2^26 mul), lean-tier workspace fallback, 250 ms-cached VRAM budget gate;
+`--backend gpu` now also runs the split tree through `bs_parallel` so CPU workers
+keep chewing small muls while large muls queue on the device.
+
+Fresh CPU matrix (median of 3, **llama-server active** — 8 cores + memory
+bandwidth contending, i.e. a loaded-state caveat, not a quiet-state record):
+
+| digits | T1 total | T32 total | T32 vs quiet E7c |
+|---|---|---|---|
+| 1M | 0.237 | 0.113 | +19 % |
+| 10M | 3.808 | 1.621 | +45 % |
+| 100M | 63.83 | 26.32 | +28 % |
+
+T1 rows agree with history within ~3 % (single-thread is contention-insensitive);
+T32 rows confirm the documented 2–4 s contention penalty. GPU/hybrid end-to-end
+re-measurement (post-E7c, post-E8-overlap) is pending a VRAM window: llama-server
+holds 14.1/16.3 GB while this session runs. Last real GPU rows remain
+`benchmarks/e4_pi.jsonl` (E4-era, 1T): 10M gpu 2.42 s vs cpu 3.81 s; 30M gpu 9.13 s
+vs cpu 16.29 s — split-only 2.6x — pending re-measure per the E7c caveat.

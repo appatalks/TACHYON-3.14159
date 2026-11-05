@@ -719,8 +719,11 @@ void compute_pi(const PiOptions& opt, mpz_t out, PiTimings& tm) {
   }
 
   rep("split", 0.0);
-  if (par_threads > 1 && opt.backend == "cpu") {
+  if (par_threads > 1 && (opt.backend == "cpu" || opt.backend == "gpu")) {
     // E5a: task-parallel split (GMP ops on distinct operands are thread-safe).
+    // E8: the gpu backend joins the parallel schedule; large products queue on
+    // the device mutex inside tachyon_cuda_mul while workers keep chewing
+    // reductions and small products on their own cores.
     bs_parallel(top, eng, N, opt.leaf, par_threads, opt.progress ? &opt.progress : nullptr);
   } else {
     bs(top, ctx, 0, 0, N);

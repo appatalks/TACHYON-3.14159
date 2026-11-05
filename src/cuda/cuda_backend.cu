@@ -92,8 +92,10 @@
  *     falls back to an exact mpz_mul on the CPU instead of aborting, and a
  *     Karatsuba recursion whose leaves all fell back reports last_gpu_ms = 0.
  *
- * NOT thread-safe: one global device cache; a mutex around tachyon_cuda_mul
- * is assumed (the engine serialises multiplies).
+ * Thread-safe: the device section of gpu_mul_abs serialises on an internal
+ * mutex (E8), so tachyon_cuda_mul may be called from every split worker;
+ * budget gating, size math and the small-N / Karatsuba-fallback paths run
+ * lock-free on the calling thread.
  */
 
 #include <cuda_runtime.h>
@@ -104,6 +106,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
+#include <mutex>
 
 #define CUDA_CHK(expr)                                                       \
   do {                                                                       \
@@ -451,8 +455,42 @@ struct DevBuf {
   size_t bytes = 0;
 };
 
-DevBuf g_A, g_B, g_C[3], g_W, g_acc, g_out, g_twF, g_cmeta;
+/* A/B are per-prime so the three prime pipelines can run concurrently on
+ * separate streams (the operands are re-repacked per prime anyway). */
+DevBuf g_A[3], g_B[3], g_C[3], g_W, g_acc, g_out, g_cmeta;
 size_t g_dev_used = 0; /* bytes currently held by this cache */
+
+/* Pinned host staging: pageable cudaMemcpy silently de-syncs the pipeline,
+ * and the twiddle tables plus operand images are large enough to matter. */
+void* g_pin_in = nullptr;
+size_t g_pin_in_bytes = 0;
+void* g_pin_out = nullptr;
+size_t g_pin_out_bytes = 0;
+
+cudaStream_t g_stream[3] = {nullptr, nullptr, nullptr};
+cudaEvent_t g_ev_in = nullptr;
+
+void* pin_ensure(void** pp, size_t& cap, size_t bytes) {
+  if (cap >= bytes) return *pp;
+  if (*pp) {
+    cudaFreeHost(*pp);
+    *pp = nullptr;
+    cap = 0;
+  }
+  CUDA_CHK(cudaHostAlloc(pp, bytes, cudaHostAllocDefault));
+  cap = bytes;
+  return *pp;
+}
+
+void streams_ensure() {
+  static const bool ready = []() {
+    for (int i = 0; i < 3; ++i)
+      CUDA_CHK(cudaStreamCreateWithFlags(&g_stream[i], cudaStreamNonBlocking));
+    CUDA_CHK(cudaEventCreateWithFlags(&g_ev_in, cudaEventDisableTiming));
+    return true;
+  }();
+  (void)ready;
+}
 
 double g_last_gpu_ms = 0.0;
 uint64_t g_gpu_calls = 0; /* number of times gpu_mul_abs actually ran */
@@ -489,6 +527,12 @@ void build_twiddle(uint32_t* tab, uint32_t N, uint32_t g) {
 struct TwEntry {
   uint32_t n = 0;
   uint32_t* fwd[3] = {nullptr, nullptr, nullptr};
+  /* Device mirrors, uploaded once per table and reused across the many
+   * Chudnovsky iterations that share one transform size.  At N = 2^26 a
+   * fresh pageable upload of all three tables costs ~25 ms per multiply;
+   * cached, the amortized cost is near zero. */
+  uint32_t* dev[3] = {nullptr, nullptr, nullptr};
+  size_t dev_bytes = 0;
 };
 TwEntry g_tw_cache[2];
 int g_tw_victim = 0;
@@ -502,7 +546,13 @@ TwEntry* twiddle_host(uint32_t N) {
     for (int i = 0; i < 3; ++i) {
       std::free(e.fwd[i]);
       e.fwd[i] = nullptr;
+      if (e.dev[i]) {
+        CUDA_CHK(cudaFree(e.dev[i]));
+        e.dev[i] = nullptr;
+      }
     }
+    g_dev_used -= e.dev_bytes;
+    e.dev_bytes = 0;
     e.n = 0;
   }
   for (int i = 0; i < 3; ++i) {
@@ -524,14 +574,30 @@ TwEntry* twiddle_host(uint32_t N) {
 }
 
 /* Device budget: min(free + our own cached footprint - 300 MB, 10 GB).
- * The GPU is shared, so the free figure is re-read on every call. */
+ * The GPU is shared, so the free figure is refreshed periodically -- but NOT
+ * on every mul: with a foreign process (e.g. an LLM) holding the device,
+ * cudaMemGetInfo on every dispatched mul burned ~15% of the whole 200M-digit
+ * run in driver round-trips while every gate failed anyway.  A 250 ms TTL
+ * keeps adaptation fast enough and the attempt cost near zero.  The gate is
+ * evaluated by mul worker threads without the device mutex, so the cached
+ * reading is atomic (benign races by design). */
 size_t workspace_cap() {
+  static std::atomic<long long> s_cap_ns{0};  // steady-clock time of reading
+  static std::atomic<size_t> s_cap_val{0};    // cached cap
+  const long long now_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  if (now_ns - s_cap_ns.load(std::memory_order_relaxed) <
+      250ll * 1000ll * 1000ll)
+    return s_cap_val.load(std::memory_order_relaxed);
+  s_cap_ns.store(now_ns, std::memory_order_relaxed);
   size_t free_b = 0, total_b = 0;
-  if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) return 0;
+  if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) return s_cap_val = 0;
   const size_t avail = free_b + g_dev_used;
-  if (avail <= kHeadroomBytes) return 0;
+  if (avail <= kHeadroomBytes) return s_cap_val = 0;
   const size_t cap = avail - kHeadroomBytes;
-  return cap < kWorkspaceCeil ? cap : kWorkspaceCeil;
+  return s_cap_val = cap < kWorkspaceCeil ? cap : kWorkspaceCeil;
 }
 
 size_t words_for_limbs(uint32_t limbs) {
@@ -545,9 +611,24 @@ size_t workspace_need(uint32_t N) {
   /* Both 64-bit operand images together: la + lb - 1 <= N, so between them
    * they occupy at most words_for_limbs(N) + a few words. */
   const size_t wsrc = words_for_limbs(N) + 8;
-  return 4 * n * 5 /* A,B,C1..3 */ + 2 * n /* twF holds N/2+1 entries */ +
+  return 4 * n * 9 /* A x3, B x3, C x3 (per-prime for stream overlap) */ +
+         6 * n /* device twiddle tables, 3 x (N/2 + 1) */ +
          4 * (n + 3) /* acc, 32-bit */ +
          8 * wout + 8 * wsrc + (1u << 20) /* slack: cmeta + alignment */;
+}
+
+/* Same pipeline with ONE shared A/B pair on a single stream (E4 layout):
+ * 46 % less device footprint, used automatically when the three-stream
+ * overlap cannot be afforded.  The device twiddle cache and pinned staging
+ * still apply, so this tier still beats the old E4 numbers. */
+size_t workspace_need_lean(uint32_t N) {
+  const size_t n = N;
+  const size_t wout = words_for_limbs(N) + 4;
+  const size_t wsrc = words_for_limbs(N) + 8;
+  return 4 * n * 5 /* A,B,C1..3 */ +
+         6 * n /* device twiddle tables */ +
+         4 * (n + 3) /* acc, 32-bit */ +
+         8 * wout + 8 * wsrc + (1u << 20);
 }
 
 dim3 grid_for(uint32_t n) {
@@ -562,10 +643,10 @@ size_t limbs_of(mpz_srcptr x) {
 
 /* Forward NTT (in place): bit-reversal permutation, then DIT stages. */
 template <uint32_t P>
-void ntt_forward(uint32_t* x, const uint32_t* tw, int logn) {
-  bitrev_perm_kernel<<<grid_for(1u << logn), kThreads>>>(x, logn);
+void ntt_forward(uint32_t* x, const uint32_t* tw, int logn, cudaStream_t st) {
+  bitrev_perm_kernel<<<grid_for(1u << logn), kThreads, 0, st>>>(x, logn);
   for (int s = 0; s < logn; ++s)
-    ntt_stage_kernel<P, false><<<grid_for(1u << (logn - 1)), kThreads>>>(
+    ntt_stage_kernel<P, false><<<grid_for(1u << (logn - 1)), kThreads, 0, st>>>(
         x, tw, logn, s);
 }
 
@@ -574,12 +655,13 @@ void ntt_forward(uint32_t* x, const uint32_t* tw, int logn) {
  * twiddle table (the inverse DFT is the forward DFT with the inverse root). */
 template <uint32_t P>
 void ntt_inverse_fused(uint32_t* dst, const uint32_t* a, const uint32_t* b,
-                       const uint32_t* tw, int logn, uint32_t inv_n) {
-  ntt_pointwise_kernel<P><<<grid_for(1u << logn), kThreads>>>(dst, a, b, logn,
-                                                              inv_n);
-  bitrev_perm_kernel<<<grid_for(1u << logn), kThreads>>>(dst, logn);
+                       const uint32_t* tw, int logn, uint32_t inv_n,
+                       cudaStream_t st) {
+  ntt_pointwise_kernel<P><<<grid_for(1u << logn), kThreads, 0, st>>>(
+      dst, a, b, logn, inv_n);
+  bitrev_perm_kernel<<<grid_for(1u << logn), kThreads, 0, st>>>(dst, logn);
   for (int s = 0; s < logn; ++s)
-    ntt_stage_kernel<P, true><<<grid_for(1u << (logn - 1)), kThreads>>>(
+    ntt_stage_kernel<P, true><<<grid_for(1u << (logn - 1)), kThreads, 0, st>>>(
         dst, tw, logn, s);
 }
 
@@ -600,7 +682,15 @@ bool gpu_mul_abs(mpz_ptr res, mpz_srcptr xa, mpz_srcptr xb, uint32_t N) {
   const mp_size_t nb = mpz_size(xb);
   const int logn = ceil_log2(N);
 
-  if (workspace_need(N) > workspace_cap()) return false;
+  const size_t cap_now = workspace_cap();
+  const bool overlap = workspace_need(N) <= cap_now;
+  if (!overlap && workspace_need_lean(N) > cap_now) {
+    if (std::getenv("TACHYON_GPU_DEBUG"))
+      std::fprintf(stderr, "[gpu-gate] N=%u need=%zu/%zu cap=%zu used=%zu\n",
+                   N, workspace_need(N), workspace_need_lean(N), cap_now,
+                   g_dev_used);
+    return false;
+  }
 
   /* The CRT kernel spreads coefficient k over acc[k..k+2], and the top
    * coefficient (index la + lb - 2) therefore needs limbs up to index
@@ -615,23 +705,40 @@ bool gpu_mul_abs(mpz_ptr res, mpz_srcptr xa, mpz_srcptr xb, uint32_t N) {
   const uint32_t nchunks =
       (uint32_t)((carry_limbs + kCarryChunk - 1) / kCarryChunk);
 
-  /* Grow-on-demand device cache. */
-  buf_ensure(g_A, 4ull * N);
-  buf_ensure(g_B, 4ull * N);
-  for (int i = 0; i < 3; ++i) buf_ensure(g_C[i], 4ull * N);
+  /* E8: the device cache and streams are process-wide singletons; with the
+   * task-parallel split several workers can hold GPU-sized products at once,
+   * so the whole device section serialises on this mutex.  Everything above
+   * (size math + budget gate on the cached cap) is read-only and lock-free,
+   * which is what keeps the foreign-occupant fallback path cheap. */
+  static std::mutex g_dev_mtx;
+  std::lock_guard<std::mutex> dev_lk(g_dev_mtx);
+
+  streams_ensure();
+
+  /* Grow-on-demand device cache.  The lean tier shares one A/B pair across
+   * the three primes (everything then runs in order on stream 0). */
+  for (int i = 0; i < 3; ++i) {
+    if (overlap || i == 0) {
+      buf_ensure(g_A[i], 4ull * N);
+      buf_ensure(g_B[i], 4ull * N);
+    }
+    buf_ensure(g_C[i], 4ull * N);
+  }
   /* +3 slots: the CRT kernel writes acc[i+1] / acc[i+2] for i up to N - 1. */
   buf_ensure(g_acc, 4ull * ((size_t)N + 3));
   buf_ensure(g_out, 8ull * (size_t)nwords_out + 8);
-  buf_ensure(g_twF, 4ull * ((size_t)N / 2 + 1));
   buf_ensure(g_cmeta, 8ull * ((size_t)nchunks + 2));
   buf_ensure(g_W, 8ull * ((size_t)na + (size_t)nb + 4));
 
-  uint32_t* A = (uint32_t*)g_A.p;
-  uint32_t* B = (uint32_t*)g_B.p;
+  uint32_t* A[3] = {(uint32_t*)g_A[0].p, (uint32_t*)g_A[1].p, (uint32_t*)g_A[2].p};
+  uint32_t* B[3] = {(uint32_t*)g_B[0].p, (uint32_t*)g_B[1].p, (uint32_t*)g_B[2].p};
+  if (!overlap) {
+    A[1] = A[2] = A[0];
+    B[1] = B[2] = B[0];
+  }
   uint32_t* C[3] = {(uint32_t*)g_C[0].p, (uint32_t*)g_C[1].p, (uint32_t*)g_C[2].p};
   uint32_t* acc = (uint32_t*)g_acc.p;
   uint64_t* outw = (uint64_t*)g_out.p;
-  uint32_t* twF = (uint32_t*)g_twF.p;
   uint32_t* cmeta = (uint32_t*)g_cmeta.p;
   uint64_t* W = (uint64_t*)g_W.p;
   const uint64_t woff_b = (uint64_t)na; /* second operand image offset (words) */
@@ -642,60 +749,89 @@ bool gpu_mul_abs(mpz_ptr res, mpz_srcptr xa, mpz_srcptr xb, uint32_t N) {
 
   const auto t0 = std::chrono::steady_clock::now();
 
-  CUDA_CHK(cudaMemcpyAsync(W, da, 8ull * (size_t)na, cudaMemcpyHostToDevice, 0));
-  CUDA_CHK(cudaMemcpyAsync(W + woff_b, db, 8ull * (size_t)nb,
-                           cudaMemcpyHostToDevice, 0));
+  /* Operand images ride a pinned staging buffer: one host memcpy, then a
+   * genuinely asynchronous PCIe burst on stream 0; the other two streams
+   * wait on an event for the same image. */
+  const size_t insz = 8ull * ((size_t)na + (size_t)nb + 4);
+  uint64_t* pinIn = (uint64_t*)pin_ensure(&g_pin_in, g_pin_in_bytes, insz);
+  std::memcpy(pinIn, da, 8ull * (size_t)na);
+  std::memcpy(pinIn + na, db, 8ull * (size_t)nb);
+  CUDA_CHK(cudaMemcpyAsync(W, pinIn, 8ull * ((size_t)na + (size_t)nb),
+                           cudaMemcpyHostToDevice, g_stream[0]));
+  if (overlap) {
+    CUDA_CHK(cudaEventRecord(g_ev_in, g_stream[0]));
+    CUDA_CHK(cudaStreamWaitEvent(g_stream[1], g_ev_in, 0));
+    CUDA_CHK(cudaStreamWaitEvent(g_stream[2], g_ev_in, 0));
+  }
 
   for (int prime = 0; prime < 3; ++prime) {
-    CUDA_CHK(cudaMemcpyAsync(twF, tw->fwd[prime], 4ull * ((size_t)N / 2 + 1),
-                             cudaMemcpyHostToDevice, 0));
+    cudaStream_t st = overlap ? g_stream[prime] : g_stream[0];
+    /* Twiddles live on the device for the whole lifetime of the cache entry;
+     * the first use of a size uploads, the rest of the bucket rides free. */
+    if (!tw->dev[prime]) {
+      const size_t tb = 4ull * ((size_t)N / 2 + 1);
+      CUDA_CHK(cudaMalloc((void**)&tw->dev[prime], tb));
+      tw->dev_bytes += tb;
+      g_dev_used += tb;
+      CUDA_CHK(cudaMemcpyAsync(tw->dev[prime], tw->fwd[prime], tb,
+                               cudaMemcpyHostToDevice, st));
+    }
+    const uint32_t* twF = tw->dev[prime];
     switch (prime) {
       case 0: {
         constexpr uint32_t P = kP[0];
-        repack_kernel<<<grid_for(N), kThreads>>>(W, (uint32_t)na, A, N, P);
-        repack_kernel<<<grid_for(N), kThreads>>>(W + woff_b, (uint32_t)nb, B, N, P);
-        ntt_forward<P>(A, twF, logn);
-        ntt_forward<P>(B, twF, logn);
-        ntt_inverse_fused<P>(C[0], A, B, twF, logn, mod_inv(N, P));
+        repack_kernel<<<grid_for(N), kThreads, 0, st>>>(W, (uint32_t)na, A[0], N, P);
+        repack_kernel<<<grid_for(N), kThreads, 0, st>>>(W + woff_b, (uint32_t)nb, B[0], N, P);
+        ntt_forward<P>(A[0], twF, logn, st);
+        ntt_forward<P>(B[0], twF, logn, st);
+        ntt_inverse_fused<P>(C[0], A[0], B[0], twF, logn, mod_inv(N, P), st);
         break;
       }
       case 1: {
         constexpr uint32_t P = kP[1];
-        repack_kernel<<<grid_for(N), kThreads>>>(W, (uint32_t)na, A, N, P);
-        repack_kernel<<<grid_for(N), kThreads>>>(W + woff_b, (uint32_t)nb, B, N, P);
-        ntt_forward<P>(A, twF, logn);
-        ntt_forward<P>(B, twF, logn);
-        ntt_inverse_fused<P>(C[1], A, B, twF, logn, mod_inv(N, P));
+        repack_kernel<<<grid_for(N), kThreads, 0, st>>>(W, (uint32_t)na, A[1], N, P);
+        repack_kernel<<<grid_for(N), kThreads, 0, st>>>(W + woff_b, (uint32_t)nb, B[1], N, P);
+        ntt_forward<P>(A[1], twF, logn, st);
+        ntt_forward<P>(B[1], twF, logn, st);
+        ntt_inverse_fused<P>(C[1], A[1], B[1], twF, logn, mod_inv(N, P), st);
         break;
       }
       default: {
         constexpr uint32_t P = kP[2];
-        repack_kernel<<<grid_for(N), kThreads>>>(W, (uint32_t)na, A, N, P);
-        repack_kernel<<<grid_for(N), kThreads>>>(W + woff_b, (uint32_t)nb, B, N, P);
-        ntt_forward<P>(A, twF, logn);
-        ntt_forward<P>(B, twF, logn);
-        ntt_inverse_fused<P>(C[2], A, B, twF, logn, mod_inv(N, P));
+        repack_kernel<<<grid_for(N), kThreads, 0, st>>>(W, (uint32_t)na, A[2], N, P);
+        repack_kernel<<<grid_for(N), kThreads, 0, st>>>(W + woff_b, (uint32_t)nb, B[2], N, P);
+        ntt_forward<P>(A[2], twF, logn, st);
+        ntt_forward<P>(B[2], twF, logn, st);
+        ntt_inverse_fused<P>(C[2], A[2], B[2], twF, logn, mod_inv(N, P), st);
         break;
       }
     }
   }
 
-  CUDA_CHK(cudaMemsetAsync(acc, 0, 4ull * ((size_t)N + 3), 0));
+  /* The CRT stage consumes all three residue planes; join the side streams
+   * and run the epilogue on stream 0. */
+  CUDA_CHK(cudaStreamSynchronize(g_stream[1]));
+  CUDA_CHK(cudaStreamSynchronize(g_stream[2]));
+  CUDA_CHK(cudaMemsetAsync(acc, 0, 4ull * ((size_t)N + 3), g_stream[0]));
   crt_accum_kernel<kP[0], kP[1], kP[2]>
-      <<<grid_for(N), kThreads>>>(C[0], C[1], C[2], acc, N);
-  carry_local_kernel<<<nchunks, kCarryThreads>>>(acc, cmeta,
-                                                 (uint32_t)carry_limbs);
-  carry_scan_kernel<<<1, 1>>>(acc, cmeta, (uint32_t)carry_limbs, nchunks);
-  carry_fix_kernel<<<nchunks, kCarryThreads>>>(acc, cmeta,
-                                               (uint32_t)carry_limbs);
-  pack64_kernel<<<grid_for((uint32_t)nwords_out), kThreads>>>(
+      <<<grid_for(N), kThreads, 0, g_stream[0]>>>(C[0], C[1], C[2], acc, N);
+  carry_local_kernel<<<nchunks, kCarryThreads, 0, g_stream[0]>>>(
+      acc, cmeta, (uint32_t)carry_limbs);
+  carry_scan_kernel<<<1, 1, 0, g_stream[0]>>>(acc, cmeta,
+                                              (uint32_t)carry_limbs, nchunks);
+  carry_fix_kernel<<<nchunks, kCarryThreads, 0, g_stream[0]>>>(
+      acc, cmeta, (uint32_t)carry_limbs);
+  pack64_kernel<<<grid_for((uint32_t)nwords_out), kThreads, 0, g_stream[0]>>>(
       acc, outw, (uint32_t)out_limbs, (uint32_t)nwords_out);
 
-  /* The product lands straight in `res` digit storage. */
+  /* The product lands straight in `res` digit storage, via pinned staging. */
   mp_limb_t* dst = mpz_limbs_write(res, nwords_out);
-  CUDA_CHK(cudaMemcpyAsync(dst, outw, 8ull * (size_t)nwords_out,
-                           cudaMemcpyDeviceToHost, 0));
-  CUDA_CHK(cudaDeviceSynchronize());
+  const size_t outsz = 8ull * (size_t)nwords_out;
+  uint64_t* pinOut = (uint64_t*)pin_ensure(&g_pin_out, g_pin_out_bytes, outsz);
+  CUDA_CHK(cudaMemcpyAsync(pinOut, outw, outsz, cudaMemcpyDeviceToHost,
+                           g_stream[0]));
+  CUDA_CHK(cudaStreamSynchronize(g_stream[0]));
+  std::memcpy(dst, pinOut, outsz);
   g_last_gpu_ms =
       std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - t0).count();
