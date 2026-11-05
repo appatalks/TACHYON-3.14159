@@ -215,8 +215,10 @@ trials after warm-up. Nothing here is extrapolated or quoted from other machines
 
 ## Planned next
 
-- E5b: CUDA-stream concurrency — dispatch GPU muls on non-blocking streams while CPU
-  workers chew independent subtrees (the real hybrid value; today hybrid ≡ gpu serial).
+- E5b: MEASURED/REJECTED for the current scheduler — post-E8 T32 matrix shows GPU
+  1.17x faster than CPU at 100M (17.78 vs 20.88 s), but hybrid is slower at every
+  tested size (1.996/7.110/27.456 s vs CPU 1.127/4.331/20.878 s at 10M/30M/100M).
+  Dispatch queueing does not yet overlap enough useful CPU subtree work.
 - E5c: cost-balanced splitting — choose split points so the serial spine holds a smaller
   share of total work (unequal spans sized by estimated mul cost), attacking the ~3.6x
   split-scaling ceiling found in E5a.
@@ -230,6 +232,7 @@ trials after warm-up. Nothing here is extrapolated or quoted from other machines
   route toward y-cruncher's 1.814 s @100M.
 - 1B-digit feasibility: first run in progress (see BENCHMARKS.md).
 - Re-measure GPU/hybrid end-to-end rows post BUG-1-fix (E4 rows carry the oversized-P penalty).
-  Partially done 2026-11-05: T1 200M/500M CPU-vs-GPU rows in BENCHMARKS.md (GPU parity at
-  200M, 3.8x loss at 500M past the N=2^24 NTT cap); T32 + hybrid rows still pending a
-  contention-free VRAM window.
+  DONE 2026-11-05: T32 E5b matrix in `BENCHMARKS.md` and
+  `benchmarks/e5b_gpu_matrix_20261105.jsonl`; GPU wins at 100M, current hybrid loses
+  at all tested sizes. T1 200M/500M rows remain the large-size crossover evidence:
+  parity at 200M, 3.8x loss at 500M past the N=2^24 NTT cap.

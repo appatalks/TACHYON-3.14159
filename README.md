@@ -110,12 +110,13 @@ Best per size (CPU, `--threads 32`, no verify/disk-write):
 (y-cruncher also lists a 1.107 s @100M mode; we cite its conservative
 normal-mode figures.) Single-thread CPU reference: 1M 0.24 s, 10M 3.81 s,
 100M 63.8 s. With `--backend gpu` (single thread, E4-era build): 10M 2.42 s
-and 30M 9.13 s — **1.6–1.8x faster than the same-thread CPU path**. The GPU
-advantage shrinks with size: parity at 200M, then 3.8x behind at 500M, because
+and 30M 9.13 s — **1.6–1.8x faster than the same-thread CPU path**. In the
+post-E8 T32 matrix, GPU is 1.17x faster at 100M (17.78 vs 20.88 s), while the
+current hybrid scheduler is slower at 10M/30M/100M because dispatch queueing
+does not yet overlap useful CPU subtree work. The GPU advantage still shrinks
+with size beyond that point: parity at 200M, then 3.8x behind at 500M, because
 the CUDA NTT caps at N=2^24 limbs and larger products fall back to device
-Karatsuba (see `BENCHMARKS.md` crossover table). Combining CUDA muls with the
-32-thread split tree (E5b/E8) is in progress and needs a GPU window free of
-other workloads.
+Karatsuba (see `BENCHMARKS.md`).
 
 Measurement hygiene (learned the hard way, see `EXPERIMENTS.md`): concurrent
 compiles, back-to-back runs, or an actively generating local LLM inflate T32
