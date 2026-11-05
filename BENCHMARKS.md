@@ -167,3 +167,24 @@ re-measurement (post-E7c, post-E8-overlap) is pending a VRAM window: llama-serve
 holds 14.1/16.3 GB while this session runs. Last real GPU rows remain
 `benchmarks/e4_pi.jsonl` (E4-era, 1T): 10M gpu 2.42 s vs cpu 3.81 s; 30M gpu 9.13 s
 vs cpu 16.29 s — split-only 2.6x — pending re-measure per the E7c caveat.
+
+## Large-size CPU-vs-GPU crossover, T1 (2026-11-05, pre-compaction async run)
+
+`--benchmark --trials 1`, no `--threads` (so **1 thread both sides**), no verify;
+build dir binary rebuilt mid-run (later rows E8); llama-server held 14.1 GB VRAM
+during the GPU rows (budget gate + contention caveat):
+
+| digits | backend | split s | total s |
+|---|---|---|---|
+| 200M | cpu | 107.1 | 148.9 |
+| 200M | gpu  | 104.7 | 153.9 |
+| 500M | cpu | 361.9 | 498.7 |
+| 500M | gpu  | 1800.8 | 1917.2 |
+
+Crossover curve with the E4 rows (gpu wins up to 1.8x end-to-end at <=30M, T1):
+GPU ~= CPU at 200M, then 3.8x SLOWER at 500M. Cause: the CUDA NTT caps at
+N=2^24 limbs; above that the device path recurses into Karatsuba (no FFT
+tier), and the VRAM budget gate spills individual muls to CPU fallback.
+The sqrt/final/convert phases are GMP-CPU in both backends and agree within
+thermal noise. Closing the 500M gap needs an out-of-core or multi-kernel
+larger-NTT tier (H3/E8-FFT plan in EXPERIMENTS.md).
