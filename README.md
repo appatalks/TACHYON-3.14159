@@ -5,8 +5,9 @@ platform for testing whether heterogeneous, hardware-aware computation graphs ca
 beat fixed-strategy big-integer pipelines. Target hardware: AMD Ryzen 9 9950X
 (16C/32T, AVX-512) + NVIDIA RTX 5070 Ti (16 GB) + 128 GB DDR5.
 
-Current best: **17.78 s @100M digits** (CUDA backend, 32 threads; BBP-verified
-in a 17.48 s confirmation run) and **318 s @1B digits** (CPU, BBP-verified).
+Current best: **17.51 s @100M digits** (corrected hybrid backend, 32 threads;
+BBP-verified in a 17.03 s confirmation run) and **318 s @1B digits** (CPU,
+BBP-verified).
 A CUDA exact-NTT mul backend wins single-threaded by up to 1.8x below 30M
 digits. See `RESEARCH.md` (hypotheses + decision log),
 `EXPERIMENTS.md` (ledger), `BENCHMARKS.md` (numbers), `ARCHITECTURE.md`
@@ -106,17 +107,17 @@ comparison):
 |---|---|---|---|
 | 1M | 0.095 s | 0.011 s | 8.6x |
 | 10M | 1.117 s | 0.115 s | 9.7x |
-| 100M | **17.781 s** (GPU; CPU baseline 20.878 s) | 1.814 s | 9.8x |
+| 100M | **17.512 s** (hybrid; verify 17.034 s; CPU baseline 20.878 s) | 1.814 s | 9.7x |
 | 1B | **317.9 s** (verify PASS, peak RSS 29.2 GB) | 14.67 s | 21.7x |
 
 (y-cruncher also lists a 1.107 s @100M mode; we cite its conservative
 normal-mode figures.) Single-thread CPU reference: 1M 0.24 s, 10M 3.81 s,
 100M 63.8 s. With `--backend gpu` (single thread, E4-era build): 10M 2.42 s
 and 30M 9.13 s — **1.6–1.8x faster than the same-thread CPU path**. In the
-post-E8 T32 matrix, GPU is 1.17x faster at 100M (17.78 vs 20.88 s), while the
-current hybrid scheduler is slower at 10M/30M/100M because dispatch queueing
-does not yet overlap useful CPU subtree work. The GPU advantage still shrinks
-with size beyond that point: parity at 200M, then 3.8x behind at 500M, because
+post-E8 T32 matrix, GPU is 1.17x faster at 100M (17.78 vs 20.88 s), and the
+corrected hybrid path is faster at 30M/100M (4.23/17.51 s) while remaining
+launch-bound at 10M (1.22 vs 1.13 s). The GPU advantage still shrinks with
+size beyond that point: parity at 200M, then 3.8x behind at 500M, because
 the CUDA NTT caps at N=2^24 limbs and larger products fall back to device
 Karatsuba (see `BENCHMARKS.md`).
 

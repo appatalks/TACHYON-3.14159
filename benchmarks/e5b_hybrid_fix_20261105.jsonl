@@ -1,0 +1,3 @@
+{"digits":10000000,"backend":"hybrid","engine":"hybrid-e1","leaf":8,"threads":32,"trials":3,"median_total":1.21501,"bs":0.321367,"sqrt":0.269005,"final":0.363242,"convert":0.235787,"write":0,"peak_rss_mb":698.379}
+{"digits":30000000,"backend":"hybrid","engine":"hybrid-e1","leaf":8,"threads":32,"trials":3,"median_total":4.22761,"bs":1.3284,"sqrt":0.933072,"final":1.22303,"convert":0.72102,"write":0,"peak_rss_mb":1647.02}
+{"digits":100000000,"backend":"hybrid","engine":"hybrid-e1","leaf":8,"threads":32,"trials":3,"median_total":17.5116,"bs":5.42232,"sqrt":3.67474,"final":4.99619,"convert":3.41839,"write":0,"peak_rss_mb":3781.17}
