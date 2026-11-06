@@ -253,6 +253,13 @@ four-prime tier therefore closes the old 500M GPU cliff: 186.95 s verified is
 2.67x faster than the 498.7 s CPU/T1 baseline and 10.3x faster than the old
 1917.2 s GPU fallback.
 
+The same backend with `--threads 32` and hybrid dispatch improves the verified
+500M result to **162.50 s** (split 110.41, sqrt 22.56, final 29.53), BBP PASS;
+including decimal conversion the benchmark is **184.83 s**. A low-risk LIFO
+queue experiment regressed hybrid 100M from 18.22 s to 21.87 s, so FIFO remains
+the production scheduler. E5c still needs a cost-aware priority scheduler,
+not a simple queue-order swap.
+
 ## Planned next
 
 - E5b: MEASURED after fixing a scheduler gate — `backend=hybrid` was accidentally

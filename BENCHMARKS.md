@@ -229,3 +229,15 @@ against the CPU/T1 baseline (498.7 s), it is **2.67x faster**. The earlier
 failed 500M verification came from an earlier build/state; split-tree
 fingerprints matched CPU and an exhaustive GMP oracle found no product
 mismatch in the current build.
+
+## 500M T32 hybrid speed record (2026-11-05)
+
+The corrected hybrid scheduler was run with `--threads 32 --verify`:
+
+| digits | backend | split s | sqrt s | final s | compute total s | conversion-inclusive s | verify |
+|---|---|---:|---:|---:|---:|---:|---|
+| 500M | hybrid/T32 | 110.41 | 22.56 | 29.53 | **162.50** | **184.83** | **PASS** |
+
+This is the fastest verified 500M result in the project. The split phase is
+now 1.24x faster than GPU/T1 (137.03 s), and the complete benchmark including
+decimal conversion is 1.36x faster than the GPU/T1 251.21 s run.

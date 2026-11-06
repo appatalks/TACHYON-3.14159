@@ -6,8 +6,9 @@ beat fixed-strategy big-integer pipelines. Target hardware: AMD Ryzen 9 9950X
 (16C/32T, AVX-512) + NVIDIA RTX 5070 Ti (16 GB) + 128 GB DDR5.
 
 Current best: **17.51 s @100M digits** (corrected hybrid backend, 32 threads;
-BBP-verified in a 17.03 s confirmation run), **186.95 s @500M digits** (GPU,
-BBP-verified), and **318 s @1B digits** (CPU, BBP-verified).
+BBP-verified in a 17.03 s confirmation run), **162.50 s @500M digits**
+(hybrid/T32, BBP-verified; 184.83 s including conversion), and **318 s @1B
+digits** (CPU, BBP-verified).
 A CUDA exact-NTT mul backend wins single-threaded by up to 1.8x below 30M
 digits. See `RESEARCH.md` (hypotheses + decision log),
 `EXPERIMENTS.md` (ledger), `BENCHMARKS.md` (numbers), `ARCHITECTURE.md`
@@ -106,6 +107,7 @@ comparison):
 | 1M | 0.095 s | 0.011 s | 8.6x |
 | 10M | 1.117 s | 0.115 s | 9.7x |
 | 100M | **17.512 s** (hybrid; verify 17.034 s; CPU baseline 20.878 s) | 1.814 s | 9.7x |
+| 500M | **162.50 s** (hybrid/T32; verify PASS; 184.83 s with conversion) | — | — |
 | 1B | **317.9 s** (verify PASS, peak RSS 29.2 GB) | 14.67 s | 21.7x |
 
 (y-cruncher also lists a 1.107 s @100M mode; we cite its conservative
