@@ -64,6 +64,7 @@ int main() {
   check_bits(1u << 27, 1u << 27, 2);   // two Karatsuba levels possible
   check_bits(1u << 28, 1u << 28, 1);   // four-prime N=2^25 tier
   check_bits(1u << 29, 1u << 28, 1);   // skewed N=2^25 tier
+  check_bits(1u << 31, 1u << 31, 1);   // outer N=2^28 Karatsuba boundary
   check_bits(1u << 29, 1u << 27, 1);   // skewed N=2^25 tier
   std::printf("gpu-mul-test: PASS\n");
   return 0;

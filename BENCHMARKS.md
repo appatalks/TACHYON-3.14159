@@ -205,5 +205,27 @@ GPU ~= CPU at 200M, then 3.8x SLOWER at 500M. Cause: the CUDA NTT caps at
 N=2^24 limbs; above that the device path recurses into Karatsuba (no FFT
 tier), and the VRAM budget gate spills individual muls to CPU fallback.
 The sqrt/final/convert phases are GMP-CPU in both backends and agree within
-thermal noise. Closing the 500M gap needs an out-of-core or multi-kernel
-larger-NTT tier (H3/E8-FFT plan in EXPERIMENTS.md).
+thermal noise. These rows are the pre-four-prime baseline.
+
+## Four-prime GPU tier: verified 500M result (2026-11-05)
+
+The fourth-prime exact NTT tier lifts the transform ceiling from N=2^24 to
+N=2^25. Direct multiplication tests pass through the new tier, including
+skewed operands; the 500M end-to-end result now passes BBP verification:
+
+| digits | backend | split s | sqrt s | final s | total s | verify |
+|---|---|---:|---:|---:|---:|---|
+| 200M | gpu | 35.72 | 7.95 | 10.16 | 53.83 | PASS |
+| 300M | gpu | 63.18 | 12.14 | 15.49 | 90.81 | PASS |
+| 400M | gpu | 87.82 | 17.11 | 22.23 | 127.16 | PASS |
+| 500M | gpu | 137.03 | 21.86 | 28.06 | **186.95** | **PASS** |
+
+The 500M benchmark without verification measured **251.21 s** including
+decimal conversion; the verified run excludes conversion and independently
+passes BBP. For apples-to-apples compute timing, the verified 500M total is
+186.95 s.
+Against the old 500M GPU baseline (1917.2 s), this is a **10.3x speedup**;
+against the CPU/T1 baseline (498.7 s), it is **2.67x faster**. The earlier
+failed 500M verification came from an earlier build/state; split-tree
+fingerprints matched CPU and an exhaustive GMP oracle found no product
+mismatch in the current build.

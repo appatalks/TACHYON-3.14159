@@ -6,8 +6,8 @@ beat fixed-strategy big-integer pipelines. Target hardware: AMD Ryzen 9 9950X
 (16C/32T, AVX-512) + NVIDIA RTX 5070 Ti (16 GB) + 128 GB DDR5.
 
 Current best: **17.51 s @100M digits** (corrected hybrid backend, 32 threads;
-BBP-verified in a 17.03 s confirmation run) and **318 s @1B digits** (CPU,
-BBP-verified).
+BBP-verified in a 17.03 s confirmation run), **186.95 s @500M digits** (GPU,
+BBP-verified), and **318 s @1B digits** (CPU, BBP-verified).
 A CUDA exact-NTT mul backend wins single-threaded by up to 1.8x below 30M
 digits. See `RESEARCH.md` (hypotheses + decision log),
 `EXPERIMENTS.md` (ledger), `BENCHMARKS.md` (numbers), `ARCHITECTURE.md`
@@ -114,10 +114,10 @@ normal-mode figures.) Single-thread CPU reference: 1M 0.24 s, 10M 3.81 s,
 and 30M 9.13 s — **1.6–1.8x faster than the same-thread CPU path**. In the
 post-E8 T32 matrix, GPU is 1.17x faster at 100M (17.78 vs 20.88 s), and the
 corrected hybrid path is faster at 30M/100M (4.23/17.51 s) while remaining
-launch-bound at 10M (1.22 vs 1.13 s). The four-prime tier now passes
-end-to-end verification through 400M digits. A preliminary 500M run measured
-251 s, but BBP failed, so it is explicitly **not accepted** until the
-remaining large-recursion defect is isolated (see `EXPERIMENTS.md`).
+launch-bound at 10M (1.22 vs 1.13 s). The four-prime tier now passes end-to-end
+verification through **500M digits**: 186.95 s compute time, versus the old
+1917 s GPU fallback and
+498.7 s CPU/T1 reference.
 
 Measurement hygiene (learned the hard way, see `EXPERIMENTS.md`): concurrent
 compiles, back-to-back runs, or an actively generating local LLM inflate T32

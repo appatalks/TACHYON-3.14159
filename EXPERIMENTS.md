@@ -238,19 +238,20 @@ about 3.3 s); the total was 20.81 s in that loaded run, so this is a useful
 tail reduction but not a new end-to-end record. The cache is immutable while
 workers read it and replaces the previous per-call table lifetime.
 
-## Four-prime GPU tier: 500M boundary remains unresolved (2026-11-05)
+## Four-prime GPU tier: verified 500M result (2026-11-05)
 
 The fourth-prime exact NTT tier builds and passes direct multiplication tests
 through N=2^25, including skewed operands. End-to-end GPU verification passes
-at 200M, 300M, and 400M digits. The 500M run completes in about **251 s** but
-fails BBP, so it is not a valid record.
+at 200M, 300M, 400M, and **500M** digits. The verified 500M run takes
+**186.95 s** excluding decimal conversion; the benchmark run including
+conversion takes 251.21 s.
 
-An exact GMP oracle sampled the large products encountered during a 500M run,
-including N=2^27 and N=2^28 recursive products, without finding a mismatching
-individual product. The remaining defect is therefore not isolated; likely
-areas for the next session are shared-state/lifetime effects across the full
-Karatsuba recursion, a later unsampled product, or the binary-splitting
-combination path. Temporary oracle instrumentation was removed before pausing.
+The prior failed 500M verification was from an earlier build/state. In the
+current build, CPU/GPU split-tree fingerprints match exactly and an exhaustive
+GMP oracle over every GPU-sized product (`N>=2^25`) finds no mismatch. The
+four-prime tier therefore closes the old 500M GPU cliff: 186.95 s verified is
+2.67x faster than the 498.7 s CPU/T1 baseline and 10.3x faster than the old
+1917.2 s GPU fallback.
 
 ## Planned next
 
@@ -274,4 +275,5 @@ combination path. Temporary oracle instrumentation was removed before pausing.
   DONE 2026-11-05: T32 E5b matrix in `BENCHMARKS.md` and
   `benchmarks/e5b_gpu_matrix_20261105.jsonl`; GPU wins at 100M, corrected hybrid
   wins at 30M and 100M. T1 200M/500M rows remain the large-size crossover evidence:
-  parity at 200M, 3.8x loss at 500M past the N=2^24 NTT cap.
+  parity at 200M and the four-prime tier now passes 500M; further GPU work can
+  target larger transforms and reducing the remaining sqrt/final/convert phases.
