@@ -108,10 +108,11 @@ comparison):
 | 10M | 1.117 s | 0.115 s | 9.7x |
 | 100M | **17.512 s** (hybrid; verify 17.034 s; CPU baseline 20.878 s) | 1.814 s | 9.7x |
 | 500M | **162.50 s** (hybrid/T32; verify PASS; 184.83 s with conversion) | — | — |
-| 1B | **317.9 s** (verify PASS, peak RSS 29.2 GB) | 14.67 s | 21.7x |
+| 1B | **317.9 s** (verify PASS, peak RSS 29.2 GB) | 27.97 s | 11.4x |
 
-(y-cruncher also lists a 1.107 s @100M mode; we cite its conservative
-normal-mode figures.) Single-thread CPU reference: 1M 0.24 s, 10M 3.81 s,
+(The older 1.107 s @100M and 14.67 s @1B figures came from a different
+session/digit-count definition; the fresh same-host bars are 1.814 s and
+27.97 s.) Single-thread CPU reference: 1M 0.24 s, 10M 3.81 s,
 100M 63.8 s. With `--backend gpu` (single thread, E4-era build): 10M 2.42 s
 and 30M 9.13 s — **1.6–1.8x faster than the same-thread CPU path**. In the
 post-E8 T32 matrix, GPU is 1.17x faster at 100M (17.78 vs 20.88 s), and the

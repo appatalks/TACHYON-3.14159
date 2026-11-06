@@ -139,8 +139,9 @@ variance < 0.5 %; peak RSS in parens:
 | 100M | **20.48** | 9.60 | 3.66 | 3.81 | 3.32 | 5.00 GB |
 | 1B | **317.9** (verify PASS) | — | — | — | — | 29.2 GB |
 
-Gap to the y-cruncher bar on this CPU narrows to 8.6x @1M, 9.7x @10M, **11.3x
-@100M** (20.48 vs 1.814 s); @1B the bar is 14.67 s (21.7x). `--verify` PASS at
+Gap to the fresh y-cruncher bar on this CPU narrows to 8.6x @1M, 9.7x @10M,
+**11.3x @100M** (20.48 vs 1.814 s); @1B the fresh bar is 27.97 s (11.4x).
+`--verify` PASS at
 10M and 100M; 1B verified with the BBP digit check. See `EXPERIMENTS.md` E7/E7c
 for why the reciprocal-based tail was measured-and-rejected in favour of GMP.
 
