@@ -35,6 +35,7 @@ add_library(tachyon_core STATIC
   src/convert.cpp
   src/verify.cpp
   src/engine.cpp
+  src/cpu_ntt.cpp
   src/pmulp.cpp
   src/jobs.cpp
   src/http_server.cpp)
@@ -62,11 +63,21 @@ target_link_libraries(gpu-bench PRIVATE tachyon_core)
 add_executable(convert-test tests/convert_test.cpp src/convert.cpp)
 target_link_libraries(convert-test PRIVATE ${GMP_LIB} Threads::Threads)
 
-add_executable(mul-test tests/mul_test.cpp src/pmulp.cpp)
+add_executable(mul-test tests/mul_test.cpp src/pmulp.cpp src/cpu_ntt.cpp)
 target_link_libraries(mul-test PRIVATE ${GMP_LIB} Threads::Threads)
 
-add_executable(mul-bench bench/mul_bench.cpp src/pmulp.cpp)
+add_executable(mul-bench bench/mul_bench.cpp src/pmulp.cpp src/cpu_ntt.cpp)
 target_link_libraries(mul-bench PRIVATE ${GMP_LIB} Threads::Threads)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(mul-test PRIVATE OpenMP::OpenMP_CXX)
+  target_link_libraries(mul-bench PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
+add_executable(cpu-ntt-test tests/cpu_ntt_test.cpp src/cpu_ntt.cpp)
+target_link_libraries(cpu-ntt-test PRIVATE ${GMP_LIB} Threads::Threads)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(cpu-ntt-test PRIVATE OpenMP::OpenMP_CXX)
+endif()
 
 add_executable(tail-test tests/tail_test.cpp)
 target_link_libraries(tail-test PRIVATE tachyon_core)
@@ -77,3 +88,4 @@ add_test(NAME smoke COMMAND tachyon-pi --digits 101 --verify)
 add_test(NAME digits10k-bbp COMMAND tachyon-pi --digits 10000 --verify)
 add_test(NAME gpu-mul-correctness COMMAND gpu-mul-test)
 set_tests_properties(gpu-mul-correctness PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME cpu-ntt-correctness COMMAND cpu-ntt-test)

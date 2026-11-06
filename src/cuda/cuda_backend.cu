@@ -6,21 +6,22 @@
  *   int    tachyon_cuda_probe(void)
  *   double tachyon_cuda_last_gpu_ms(void)
  *
- * ALGORITHM: three-prime Number-Theoretic Transform (NTT) convolution of
+ * ALGORITHM: four-prime Number-Theoretic Transform (NTT) convolution of
  * base-2^28 limb vectors + Garner's mixed-radix CRT reconstruction.
  *
  *   p1 = 167772161 = 5  * 2^25 + 1,  primitive root g1 = 3
  *   p2 = 469762049 = 7  * 2^26 + 1,  primitive root g2 = 3
- *   p3 = 754974721 = 45 * 2^24 + 1,  primitive root g3 = 11
+ *   p3 = 1811939329 = 27 * 2^26 + 1, primitive root g3 = 13
+ *   p4 = 2013265921 = 15 * 2^27 + 1, primitive root g4 = 31
  *
- * Max transform length N = 2^24 (p3 has 2-adicity exactly 24; p1/p2 admit
- * longer transforms, so all three share a principal 2^24-th root of unity).
+ * Max transform length N = 2^25 (all four primes admit a principal
+ * 2^25-th root of unity).
  *
  * EXACTNESS ARGUMENT.  With limb width B = 2^28 and transform length N,
  * every convolution coefficient obeys
- *      0 <= c_k <= (#pairs feeding k) * (B-1)^2 < N * B^2 = 2^24 * 2^56 = 2^80.
- * The modulus product M = p1*p2*p3 ~= 2^85.6 > 2^80, so the residue triple
- * (c_k mod p1, c_k mod p2, c_k mod p3) determines c_k uniquely over the
+ *      0 <= c_k <= (#pairs feeding k) * (B-1)^2 < N * B^2 = 2^25 * 2^56 = 2^81.
+ * The modulus product M = p1*p2*p3*p4 ~= 2^115 > 2^81, so the residue tuple
+ * (c_k mod p1, c_k mod p2, c_k mod p3, c_k mod p4) determines c_k uniquely over the
  * integers: the CRT reconstruction is EXACT.  No floating point is used
  * anywhere in the numeric path, so the result matches mpz_mul bit-for-bit.
  *
@@ -36,12 +37,12 @@
  *       w^-1, and w^-k = -w^(N/2-k) because w^(N/2) == -1); each prime thus
  *       needs a single N/2+1 entry table, i.e. 1/4 of the build time, memory
  *       and PCIe traffic that separate forward/inverse tables would cost
- *   Garner CRT kernel: per index, mixed-radix digits (x1,x2,x3) give
- *       t = x1 + p1*(x2 + p2*x3) < 2^80 held in __uint128_t; its three
+ *   Garner CRT kernel: per index, mixed-radix digits (x1,x2,x3,x4) give
+ *       t = x1 + p1*(x2 + p2*(x3 + p3*x4)) < 2^112 held in __uint128_t; its four
  *       base-2^28 limbs are accumulated WITHOUT carry into uint32 acc[] via
  *       atomicAdd (each acc slot takes <= 3 contributions of < 2^28, i.e.
  *       < 2^30, far below 2^32, so no intermediate overflow is possible;
- *       three different threads legitimately share one slot address)
+ *       four different threads legitimately share one slot address)
  *   carry resolution: chunk-local normalisation (carry-in 0) + an O(#chunks)
  *       scan of the chunk carry-outs + a short per-chunk fixup with the true
  *       carry-in + a fully parallel 28->64 bit repacking.  A single-threaded
@@ -59,9 +60,9 @@
  *
  * SMALL N: N <= 2^15 -> plain mpz_mul on the CPU (launch overhead dominates;
  * the spec's 2^11 sits far below the measured crossover, see kNMinGpu);
- * last_gpu_ms reports 0.0.  LARGE N: N > 2^24 -> standard
+ * last_gpu_ms reports 0.0.  LARGE N: N > 2^25 -> standard
  * three-recursion Karatsuba at the mpz level, split at a 28-bit limb
- * boundary so every recursive product is either GPU-feasible (N <= 2^24)
+ * boundary so every recursive product is either GPU-feasible (N <= 2^25)
  * or strictly smaller, guaranteeing termination.
  *
  * DEVIATIONS FROM SPEC (deliberate; each is measured or memory-forced):
@@ -77,7 +78,7 @@
  *   - Pointwise multiply fused into the first inverse stage with the 1/N
  *     factor folded in, instead of a separate element-wise kernel.
  *   - CRT output accumulated into the base-2^28 limb image with 32-bit atomic
- *     adds (three values < 2^28 never overflow a uint32) instead of a 128-bit
+ *     adds (four values < 2^28 never overflow a uint32) instead of a 128-bit
  *     scratch array.
  *   - The spec's serial single-thread carry pass is replaced by a chunked
  *     parallel resolution (normalise each chunk with carry-in 0, chain the
@@ -129,8 +130,9 @@ namespace {
 /* ------------------------------------------------------------------ *
  * Constants                                                          *
  * ------------------------------------------------------------------ */
-constexpr uint32_t kP[3] = {167772161u, 469762049u, 754974721u};
-constexpr uint32_t kG[3] = {3u, 3u, 11u};
+constexpr uint32_t kP[4] = {167772161u, 469762049u, 1811939329u,
+                             2013265921u};
+constexpr uint32_t kG[4] = {3u, 3u, 13u, 31u};
 
 constexpr int kLimbBits = 28;
 constexpr uint32_t kLimbMask = (1u << kLimbBits) - 1u;
@@ -146,8 +148,8 @@ constexpr uint32_t kLimbMask = (1u << kLimbBits) - 1u;
  * The spec's 2^11 would route a large share of a real Chudnovsky run through a
  * path 5-12x slower than mpz_mul, so the cutoff here is 2^15. */
 constexpr uint32_t kNMinGpu = 1u << 15; /* below this: CPU mpz_mul  */
-constexpr uint32_t kNMaxGpu = 1u << 24; /* above this: Karatsuba    */
-constexpr uint32_t kMaxHalfLimbs = kNMaxGpu / 2; /* 2^23 limbs per factor */
+constexpr uint32_t kNMaxGpu = 1u << 25; /* above this: Karatsuba    */
+constexpr uint32_t kMaxHalfLimbs = kNMaxGpu / 2; /* 2^24 limbs per factor */
 constexpr int kThreads = 256;
 constexpr size_t kHeadroomBytes = 300ull << 20; /* free-memory slack */
 constexpr size_t kWorkspaceCeil = 10ull << 30;  /* hard 10 GB ceiling */
@@ -201,7 +203,7 @@ __global__ void bitrev_perm_kernel(uint32_t* __restrict__ x, int logn) {
   }
 }
 
-/* Modular multiply.  P is a template constant (all three primes are < 2^31),
+/* Modular multiply.  P is a template constant (all four primes are < 2^31),
  * so the 64x32 product and the constant `% P` compile to a reciprocal
  * multiply - no division instruction and no Barrett round-off to audit. */
 template <uint32_t P>
@@ -258,7 +260,7 @@ __global__ void ntt_pointwise_kernel(uint32_t* __restrict__ dst,
  * Limb j straddles words:  limb = (w[j*28/64] >> (j*28%64))
  *                                 | (w[j*28/64 + 1] << (64 - j*28%64)).
  * Words past the end read as zero (zero extension); shift-by-64 is avoided.
- * All three primes exceed 2^27, so one conditional subtract reduces a
+ * All four primes exceed 2^27, so one conditional subtract reduces a
  * 28-bit limb modulo P. */
 __global__ void repack_kernel(const uint64_t* __restrict__ wsrc,
                               uint32_t nwords, uint32_t* __restrict__ dst,
@@ -283,7 +285,7 @@ __global__ void repack_kernel(const uint64_t* __restrict__ wsrc,
 }
 
 /* Garner / mixed-radix CRT + carry-free accumulation into base-2^28 slots.
- * x1 < p1 < p2 and x2 < p2 < p3, so no divisions are needed at all. */
+ * The mixed-radix reconstruction uses only modular multiplications. */
 __device__ __host__ constexpr uint32_t c_mod_pow(uint32_t b, uint64_t e,
                                                  uint32_t p) {
   uint64_t r = 1, x = b % p;
@@ -295,36 +297,54 @@ __device__ __host__ constexpr uint32_t c_mod_pow(uint32_t b, uint64_t e,
   return (uint32_t)r;
 }
 
-template <uint32_t QA, uint32_t QB, uint32_t QC>
+template <uint32_t QA, uint32_t QB, uint32_t QC, uint32_t QD>
 __global__ void crt_accum_kernel(const uint32_t* __restrict__ c1,
                                  const uint32_t* __restrict__ c2,
                                  const uint32_t* __restrict__ c3,
+                                 const uint32_t* __restrict__ c4,
                                  uint32_t* __restrict__ acc, uint32_t n) {
   constexpr uint32_t kInvAmodB = c_mod_pow(QA, QB - 2, QB);
   constexpr uint32_t kInvABmodC =
       c_mod_pow((uint32_t)(((uint64_t)QA * QB) % QC), QC - 2, QC);
+  constexpr uint32_t kP12modD = (uint32_t)(((uint64_t)QA * QB) % QD);
+  constexpr uint32_t kP123modD =
+      (uint32_t)(((uint64_t)kP12modD * QC) % QD);
+  constexpr uint32_t kInvABCmodD = c_mod_pow(kP123modD, QD - 2, QD);
   constexpr uint32_t kAmodC = QA % QC;
+  constexpr uint32_t kAmodD = QA % QD;
+  constexpr uint32_t kABmodD =
+      (uint32_t)(((uint64_t)QA * QB) % QD);
   const uint32_t stride = gridDim.x * blockDim.x;
   for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
     const uint32_t x1 = c1[i];
-    uint32_t d2 = c2[i] + QB - x1; /* x1 < QB */
+    uint32_t d2 = c2[i] + QB - x1;
     if (d2 >= QB) d2 -= QB;
     const uint32_t x2 = mul_mod<QB>(d2, kInvAmodB);
-    const uint32_t mixed = (uint32_t)(((uint64_t)x1 + (uint64_t)kAmodC * x2) % QC);
+    const uint32_t mixed =
+        (uint32_t)(((uint64_t)x1 + (uint64_t)kAmodC * x2) % QC);
     uint32_t d3 = c3[i] + QC - mixed;
     if (d3 >= QC) d3 -= QC;
     const uint32_t x3 = mul_mod<QC>(d3, kInvABmodC);
+    const uint32_t mixed4 =
+        (uint32_t)(((uint64_t)x1 + (uint64_t)kAmodD * x2 +
+                    (uint64_t)kABmodD * x3) %
+                   QD);
+    uint32_t d4 = c4[i] + QD - mixed4;
+    if (d4 >= QD) d4 -= QD;
+    const uint32_t x4 = mul_mod<QD>(d4, kInvABCmodD);
 
-    const __uint128_t t = ( (__uint128_t)(uint64_t)x1)
-                        + ((__uint128_t)(uint64_t)QA) * ((uint64_t)x2 + (uint64_t)QB * x3);
-    /* Each slot acc[k] receives the matching limb of t_k, t_{k-1} and
-     * t_{k-2}, i.e. three different threads touch the same address, so the
-     * accumulation must be atomic.  Values stay < 3 * 2^28 < 2^30, far under
-     * 2^32, so no overflow is possible and plain 32-bit atomicAdd suffices
-     * (this also halves the accumulator's device footprint). */
+    const __uint128_t t =
+        static_cast<__uint128_t>(x1) +
+        static_cast<__uint128_t>(QA) *
+            (static_cast<__uint128_t>(x2) +
+             static_cast<__uint128_t>(QB) *
+                 (static_cast<__uint128_t>(x3) +
+                  static_cast<__uint128_t>(QC) * x4));
+    /* Each coefficient contributes four base-2^28 limbs. */
     atomicAdd(acc + i, (uint32_t)(t & kLimbMask));
     atomicAdd(acc + i + 1, (uint32_t)((t >> kLimbBits) & kLimbMask));
-    atomicAdd(acc + i + 2, (uint32_t)(t >> (2 * kLimbBits)));
+    atomicAdd(acc + i + 2, (uint32_t)((t >> (2 * kLimbBits)) & kLimbMask));
+    atomicAdd(acc + i + 3, (uint32_t)(t >> (3 * kLimbBits)));
   }
 }
 
@@ -457,7 +477,7 @@ struct DevBuf {
 
 /* A/B are per-prime so the three prime pipelines can run concurrently on
  * separate streams (the operands are re-repacked per prime anyway). */
-DevBuf g_A[3], g_B[3], g_C[3], g_W, g_acc, g_out, g_cmeta;
+DevBuf g_A[4], g_B[4], g_C[4], g_W, g_acc, g_out, g_cmeta;
 size_t g_dev_used = 0; /* bytes currently held by this cache */
 
 /* Pinned host staging: pageable cudaMemcpy silently de-syncs the pipeline,
@@ -467,7 +487,7 @@ size_t g_pin_in_bytes = 0;
 void* g_pin_out = nullptr;
 size_t g_pin_out_bytes = 0;
 
-cudaStream_t g_stream[3] = {nullptr, nullptr, nullptr};
+cudaStream_t g_stream[4] = {nullptr, nullptr, nullptr, nullptr};
 cudaEvent_t g_ev_in = nullptr;
 
 void* pin_ensure(void** pp, size_t& cap, size_t bytes) {
@@ -484,7 +504,7 @@ void* pin_ensure(void** pp, size_t& cap, size_t bytes) {
 
 void streams_ensure() {
   static const bool ready = []() {
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < 4; ++i)
       CUDA_CHK(cudaStreamCreateWithFlags(&g_stream[i], cudaStreamNonBlocking));
     CUDA_CHK(cudaEventCreateWithFlags(&g_ev_in, cudaEventDisableTiming));
     return true;
@@ -526,12 +546,12 @@ void build_twiddle(uint32_t* tab, uint32_t N, uint32_t g) {
  * call of the same size (the Chudnovsky loop hammers one size). */
 struct TwEntry {
   uint32_t n = 0;
-  uint32_t* fwd[3] = {nullptr, nullptr, nullptr};
+  uint32_t* fwd[4] = {nullptr, nullptr, nullptr, nullptr};
   /* Device mirrors, uploaded once per table and reused across the many
    * Chudnovsky iterations that share one transform size.  At N = 2^26 a
    * fresh pageable upload of all three tables costs ~25 ms per multiply;
    * cached, the amortized cost is near zero. */
-  uint32_t* dev[3] = {nullptr, nullptr, nullptr};
+  uint32_t* dev[4] = {nullptr, nullptr, nullptr, nullptr};
   size_t dev_bytes = 0;
 };
 TwEntry g_tw_cache[2];
@@ -543,7 +563,7 @@ TwEntry* twiddle_host(uint32_t N) {
   TwEntry& e = g_tw_cache[g_tw_victim];
   g_tw_victim ^= 1;
   if (e.n != 0) {
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
       std::free(e.fwd[i]);
       e.fwd[i] = nullptr;
       if (e.dev[i]) {
@@ -555,7 +575,7 @@ TwEntry* twiddle_host(uint32_t N) {
     e.dev_bytes = 0;
     e.n = 0;
   }
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i < 4; ++i) {
     e.fwd[i] = (uint32_t*)std::malloc(sizeof(uint32_t) * ((size_t)N / 2 + 1));
     if (!e.fwd[i]) {
       std::fprintf(stderr, "TACHYON-pi: host twiddle allocation failed\n");
@@ -569,6 +589,7 @@ TwEntry* twiddle_host(uint32_t N) {
   build_twiddle<kP[0]>(e.fwd[0], N, kG[0]);
   build_twiddle<kP[1]>(e.fwd[1], N, kG[1]);
   build_twiddle<kP[2]>(e.fwd[2], N, kG[2]);
+  build_twiddle<kP[3]>(e.fwd[3], N, kG[3]);
   e.n = N;
   return &e;
 }
@@ -611,8 +632,8 @@ size_t workspace_need(uint32_t N) {
   /* Both 64-bit operand images together: la + lb - 1 <= N, so between them
    * they occupy at most words_for_limbs(N) + a few words. */
   const size_t wsrc = words_for_limbs(N) + 8;
-  return 4 * n * 9 /* A x3, B x3, C x3 (per-prime for stream overlap) */ +
-         6 * n /* device twiddle tables, 3 x (N/2 + 1) */ +
+  return 4 * n * 12 /* A x4, B x4, C x4 (per-prime for stream overlap) */ +
+         8 * n /* device twiddle tables, 4 x (N/2 + 1) */ +
          4 * (n + 3) /* acc, 32-bit */ +
          8 * wout + 8 * wsrc + (1u << 20) /* slack: cmeta + alignment */;
 }
@@ -625,8 +646,8 @@ size_t workspace_need_lean(uint32_t N) {
   const size_t n = N;
   const size_t wout = words_for_limbs(N) + 4;
   const size_t wsrc = words_for_limbs(N) + 8;
-  return 4 * n * 5 /* A,B,C1..3 */ +
-         6 * n /* device twiddle tables */ +
+  return 4 * n * 6 /* A,B,C1..4 */ +
+         8 * n /* device twiddle tables */ +
          4 * (n + 3) /* acc, 32-bit */ +
          8 * wout + 8 * wsrc + (1u << 20);
 }
@@ -716,27 +737,30 @@ bool gpu_mul_abs(mpz_ptr res, mpz_srcptr xa, mpz_srcptr xb, uint32_t N) {
   streams_ensure();
 
   /* Grow-on-demand device cache.  The lean tier shares one A/B pair across
-   * the three primes (everything then runs in order on stream 0). */
-  for (int i = 0; i < 3; ++i) {
+   * the four primes (everything then runs in order on stream 0). */
+  for (int i = 0; i < 4; ++i) {
     if (overlap || i == 0) {
       buf_ensure(g_A[i], 4ull * N);
       buf_ensure(g_B[i], 4ull * N);
     }
     buf_ensure(g_C[i], 4ull * N);
   }
-  /* +3 slots: the CRT kernel writes acc[i+1] / acc[i+2] for i up to N - 1. */
+  /* +3 slots: the CRT kernel writes acc[i+1] through acc[i+3]. */
   buf_ensure(g_acc, 4ull * ((size_t)N + 3));
   buf_ensure(g_out, 8ull * (size_t)nwords_out + 8);
   buf_ensure(g_cmeta, 8ull * ((size_t)nchunks + 2));
   buf_ensure(g_W, 8ull * ((size_t)na + (size_t)nb + 4));
 
-  uint32_t* A[3] = {(uint32_t*)g_A[0].p, (uint32_t*)g_A[1].p, (uint32_t*)g_A[2].p};
-  uint32_t* B[3] = {(uint32_t*)g_B[0].p, (uint32_t*)g_B[1].p, (uint32_t*)g_B[2].p};
+  uint32_t* A[4] = {(uint32_t*)g_A[0].p, (uint32_t*)g_A[1].p,
+                    (uint32_t*)g_A[2].p, (uint32_t*)g_A[3].p};
+  uint32_t* B[4] = {(uint32_t*)g_B[0].p, (uint32_t*)g_B[1].p,
+                    (uint32_t*)g_B[2].p, (uint32_t*)g_B[3].p};
   if (!overlap) {
-    A[1] = A[2] = A[0];
-    B[1] = B[2] = B[0];
+    A[1] = A[2] = A[3] = A[0];
+    B[1] = B[2] = B[3] = B[0];
   }
-  uint32_t* C[3] = {(uint32_t*)g_C[0].p, (uint32_t*)g_C[1].p, (uint32_t*)g_C[2].p};
+  uint32_t* C[4] = {(uint32_t*)g_C[0].p, (uint32_t*)g_C[1].p,
+                    (uint32_t*)g_C[2].p, (uint32_t*)g_C[3].p};
   uint32_t* acc = (uint32_t*)g_acc.p;
   uint64_t* outw = (uint64_t*)g_out.p;
   uint32_t* cmeta = (uint32_t*)g_cmeta.p;
@@ -750,7 +774,7 @@ bool gpu_mul_abs(mpz_ptr res, mpz_srcptr xa, mpz_srcptr xb, uint32_t N) {
   const auto t0 = std::chrono::steady_clock::now();
 
   /* Operand images ride a pinned staging buffer: one host memcpy, then a
-   * genuinely asynchronous PCIe burst on stream 0; the other two streams
+   * genuinely asynchronous PCIe burst on stream 0; the other streams
    * wait on an event for the same image. */
   const size_t insz = 8ull * ((size_t)na + (size_t)nb + 4);
   uint64_t* pinIn = (uint64_t*)pin_ensure(&g_pin_in, g_pin_in_bytes, insz);
@@ -762,9 +786,10 @@ bool gpu_mul_abs(mpz_ptr res, mpz_srcptr xa, mpz_srcptr xb, uint32_t N) {
     CUDA_CHK(cudaEventRecord(g_ev_in, g_stream[0]));
     CUDA_CHK(cudaStreamWaitEvent(g_stream[1], g_ev_in, 0));
     CUDA_CHK(cudaStreamWaitEvent(g_stream[2], g_ev_in, 0));
+    CUDA_CHK(cudaStreamWaitEvent(g_stream[3], g_ev_in, 0));
   }
 
-  for (int prime = 0; prime < 3; ++prime) {
+  for (int prime = 0; prime < 4; ++prime) {
     cudaStream_t st = overlap ? g_stream[prime] : g_stream[0];
     /* Twiddles live on the device for the whole lifetime of the cache entry;
      * the first use of a size uploads, the rest of the bucket rides free. */
@@ -796,7 +821,7 @@ bool gpu_mul_abs(mpz_ptr res, mpz_srcptr xa, mpz_srcptr xb, uint32_t N) {
         ntt_inverse_fused<P>(C[1], A[1], B[1], twF, logn, mod_inv(N, P), st);
         break;
       }
-      default: {
+      case 2: {
         constexpr uint32_t P = kP[2];
         repack_kernel<<<grid_for(N), kThreads, 0, st>>>(W, (uint32_t)na, A[2], N, P);
         repack_kernel<<<grid_for(N), kThreads, 0, st>>>(W + woff_b, (uint32_t)nb, B[2], N, P);
@@ -805,16 +830,27 @@ bool gpu_mul_abs(mpz_ptr res, mpz_srcptr xa, mpz_srcptr xb, uint32_t N) {
         ntt_inverse_fused<P>(C[2], A[2], B[2], twF, logn, mod_inv(N, P), st);
         break;
       }
+      default: {
+        constexpr uint32_t P = kP[3];
+        repack_kernel<<<grid_for(N), kThreads, 0, st>>>(W, (uint32_t)na, A[3], N, P);
+        repack_kernel<<<grid_for(N), kThreads, 0, st>>>(W + woff_b, (uint32_t)nb, B[3], N, P);
+        ntt_forward<P>(A[3], twF, logn, st);
+        ntt_forward<P>(B[3], twF, logn, st);
+        ntt_inverse_fused<P>(C[3], A[3], B[3], twF, logn, mod_inv(N, P), st);
+        break;
+      }
     }
   }
 
-  /* The CRT stage consumes all three residue planes; join the side streams
+  /* The CRT stage consumes all four residue planes; join the side streams
    * and run the epilogue on stream 0. */
   CUDA_CHK(cudaStreamSynchronize(g_stream[1]));
   CUDA_CHK(cudaStreamSynchronize(g_stream[2]));
+  CUDA_CHK(cudaStreamSynchronize(g_stream[3]));
   CUDA_CHK(cudaMemsetAsync(acc, 0, 4ull * ((size_t)N + 3), g_stream[0]));
-  crt_accum_kernel<kP[0], kP[1], kP[2]>
-      <<<grid_for(N), kThreads, 0, g_stream[0]>>>(C[0], C[1], C[2], acc, N);
+  crt_accum_kernel<kP[0], kP[1], kP[2], kP[3]>
+      <<<grid_for(N), kThreads, 0, g_stream[0]>>>(
+          C[0], C[1], C[2], C[3], acc, N);
   carry_local_kernel<<<nchunks, kCarryThreads, 0, g_stream[0]>>>(
       acc, cmeta, (uint32_t)carry_limbs);
   carry_scan_kernel<<<1, 1, 0, g_stream[0]>>>(acc, cmeta,

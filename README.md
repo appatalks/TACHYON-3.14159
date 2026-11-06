@@ -71,19 +71,17 @@ in four phases:
 | decimal conversion | 3-level divide-and-conquer, parallel (E6, 3.0x) |
 
 `--backend gpu|hybrid` swaps the *big multiplications* onto a CUDA exact-NTT
-engine: three-prime NTT (167772161 / 469762049 / 754974721) over 28-bit limbs
-with Garner mixed-radix CRT — coefficient bound 2^80 < M ≈ 2^85.6, so
-reconstruction is exact and bit-identical to `mpz_mul` (no floating point
-anywhere). GPU-side tricks: fused pointwise+1/N kernel, one half-size twiddle
-table per prime read backwards for the inverse (E4), chunk-parallel carry
-resolution (the naive serial carry was 94.5 % of GPU time at N = 2^24),
-`__brev` instead of an LUT. E8 (in progress): per-prime 3-stream overlap,
-pinned host staging, device-resident cached twiddle tables (~25 ms saved per
-N = 2^26 mul), and a 250 ms-cached memory-budget gate so the driver isn't
-polled on every mul. N > 2^24 recurses through Karatsuba into GPU-sized
-products; anything that doesn't fit the live VRAM budget (or N ≤ 2^15) falls
-back to CPU `mpz_mul`, so the backend self-adapts to a GPU shared with other
-processes.
+engine: four-prime NTT (167772161 / 469762049 / 1811939329 / 2013265921)
+over 28-bit limbs with Garner mixed-radix CRT — coefficient bound 2^81 <
+M ≈ 2^116.5, so reconstruction is exact and bit-identical to `mpz_mul` (no
+floating point anywhere). The fourth-prime tier lifts the transform ceiling
+from N = 2^24 to N = 2^25. GPU-side tricks: fused pointwise+1/N kernel,
+one half-size twiddle table per prime read backwards for the inverse (E4),
+chunk-parallel carry resolution, `__brev` instead of an LUT, per-prime
+4-stream overlap, pinned host staging, device-resident cached twiddle tables,
+and a 250 ms-cached memory-budget gate. Anything that doesn't fit the live
+VRAM budget (or N ≤ 2^15) falls back to CPU `mpz_mul`, so the backend
+self-adapts to a GPU shared with other processes.
 
 `bench/gpu_bench.cpp` measures the raw mul backend; `bench/mul_bench.cpp` the
 CPU side. `--gpu-mem MB` caps the device budget.
@@ -116,10 +114,10 @@ normal-mode figures.) Single-thread CPU reference: 1M 0.24 s, 10M 3.81 s,
 and 30M 9.13 s — **1.6–1.8x faster than the same-thread CPU path**. In the
 post-E8 T32 matrix, GPU is 1.17x faster at 100M (17.78 vs 20.88 s), and the
 corrected hybrid path is faster at 30M/100M (4.23/17.51 s) while remaining
-launch-bound at 10M (1.22 vs 1.13 s). The GPU advantage still shrinks with
-size beyond that point: parity at 200M, then 3.8x behind at 500M, because
-the CUDA NTT caps at N=2^24 limbs and larger products fall back to device
-Karatsuba (see `BENCHMARKS.md`).
+launch-bound at 10M (1.22 vs 1.13 s). The four-prime tier now passes
+end-to-end verification through 400M digits. A preliminary 500M run measured
+251 s, but BBP failed, so it is explicitly **not accepted** until the
+remaining large-recursion defect is isolated (see `EXPERIMENTS.md`).
 
 Measurement hygiene (learned the hard way, see `EXPERIMENTS.md`): concurrent
 compiles, back-to-back runs, or an actively generating local LLM inflate T32

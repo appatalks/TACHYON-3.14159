@@ -10,6 +10,7 @@
 // written at the very end (via a private temp), so aliasing c==a or c==b is
 // safe.
 #include "pmulp.hpp"
+#include "cpu_ntt.hpp"
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -105,6 +106,14 @@ void mul_mag(mpz_t c, mpz_srcptr a, mpz_srcptr b, int depth) {
 void mpz_mul_parallel(mpz_t c, const mpz_t a, const mpz_t b, unsigned threads) {
   if (threads < 3 || (ull_)min_limbs(a, b) * GMP_LIMB_BITS < kParMinBits) {
     mpz_mul(c, a, b);
+    return;
+  }
+  const ull_ min_bits = (ull_)min_limbs(a, b) * GMP_LIMB_BITS;
+  // The scalar CPU NTT is an opt-in research backend. Its exactness is
+  // validated, but its current modular butterflies are slower than pmulp;
+  // only an explicitly requested run may select it.
+  if (std::getenv("TACHYON_CPU_NTT") && min_bits >= (1ull << 27) &&
+      mpz_mul_cpu_ntt(c, a, b, threads)) {
     return;
   }
   pmul_seed(threads);

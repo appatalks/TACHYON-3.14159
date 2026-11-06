@@ -213,6 +213,45 @@ trials after warm-up. Nothing here is extrapolated or quoted from other machines
 - Gap to y-cruncher @100M narrows 14.0x -> **11.3x** (20.48 vs 1.814); @10M
   13.8x -> 9.7x; @1M 9.7x -> 8.6x.
 
+## CPU exact-NTT prototype: exactness PASS, scalar performance REJECTED (2026-11-05)
+
+Added `src/cpu_ntt.cpp` as an opt-in three-prime exact NTT backend using the
+same 28-bit representation and CRT proof as the CUDA path. `cpu-ntt-test`
+passes signed products through the maximum supported transform tier
+(N=2^24). It is deliberately gated behind `TACHYON_CPU_NTT=1` and is not on
+the production path.
+
+The first scalar OpenMP implementation is substantially slower than the
+existing fork-join Karatsuba multiplier: at 2^26 operand bits, NTT was 1.95 s
+vs pmulp 0.063 s; at 2^27 bits, 2.73 s vs 0.164 s. The 2^28-bit NTT probe
+falls back because the required transform exceeds N=2^24. Root cause is the
+per-butterfly scalar modular multiply/reduction and stage barriers, not the
+exact CRT reconstruction. A useful CPU record attempt still requires
+Montgomery/Barrett arithmetic plus AVX-512 vectorized butterflies (issue #1).
+
+## E6 follow-up: cached decimal power table (2026-11-05)
+
+`mpz_get_str_parallel` now retains the largest `10^(2^k)` table in-process,
+so repeated server/benchmark conversions do not rebuild the serial squaring
+chain. Conversion at 100M T32 measured **3.05 s** (previous quiet rows were
+about 3.3 s); the total was 20.81 s in that loaded run, so this is a useful
+tail reduction but not a new end-to-end record. The cache is immutable while
+workers read it and replaces the previous per-call table lifetime.
+
+## Four-prime GPU tier: 500M boundary remains unresolved (2026-11-05)
+
+The fourth-prime exact NTT tier builds and passes direct multiplication tests
+through N=2^25, including skewed operands. End-to-end GPU verification passes
+at 200M, 300M, and 400M digits. The 500M run completes in about **251 s** but
+fails BBP, so it is not a valid record.
+
+An exact GMP oracle sampled the large products encountered during a 500M run,
+including N=2^27 and N=2^28 recursive products, without finding a mismatching
+individual product. The remaining defect is therefore not isolated; likely
+areas for the next session are shared-state/lifetime effects across the full
+Karatsuba recursion, a later unsampled product, or the binary-splitting
+combination path. Temporary oracle instrumentation was removed before pausing.
+
 ## Planned next
 
 - E5b: MEASURED after fixing a scheduler gate — `backend=hybrid` was accidentally

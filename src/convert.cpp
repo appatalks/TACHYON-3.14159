@@ -17,6 +17,8 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -37,7 +39,32 @@ struct Job {
   unsigned depth;
 };
 
-void convert_rec(const Job& j, const std::vector<mpz_t>& pow10, unsigned max_depth) {
+struct PowTable {
+  std::vector<mpz_t> values;
+
+  explicit PowTable(unsigned kmax) : values(kmax + 1) {
+    for (auto& value : values) mpz_init(value);
+    mpz_set_ui(values[0], 10);
+    for (unsigned i = 1; i <= kmax; ++i)
+      mpz_mul(values[i], values[i - 1], values[i - 1]);
+  }
+
+  ~PowTable() {
+    for (auto& value : values) mpz_clear(value);
+  }
+};
+
+std::shared_ptr<const PowTable> get_pow10(unsigned kmax) {
+  static std::mutex mutex;
+  static std::shared_ptr<const PowTable> cached;
+  std::lock_guard lock(mutex);
+  if (!cached || cached->values.size() <= kmax)
+    cached = std::make_shared<const PowTable>(kmax);
+  return cached;
+}
+
+void convert_rec(const Job& j, const std::vector<mpz_t>& pow10,
+                 unsigned max_depth) {
   if (j.len <= LEAF) {
     char tmp[LEAF + 4];
     mpz_get_str(tmp, 10, j.n);  // n >= 0, no sign, <= LEAF digits
@@ -92,11 +119,7 @@ char* mpz_get_str_parallel(mpz_srcptr x, unsigned threads) {
   mp_size_t nd = mpz_sizeinbase(x, 10);
   const unsigned kmax = log2_floor(nd);  // need P[kmax] = 10^(2^kmax)
 
-  // Serial squaring chain: P[k] = P[k-1]^2.
-  std::vector<mpz_t> pow10(kmax + 1);
-  for (unsigned i = 0; i <= kmax; ++i) mpz_init(pow10[i]);
-  mpz_set_ui(pow10[0], 10);
-  for (unsigned i = 1; i <= kmax; ++i) mpz_mul(pow10[i], pow10[i - 1], pow10[i - 1]);
+  const std::shared_ptr<const PowTable> pow10 = get_pow10(kmax);
 
   std::size_t const total = static_cast<std::size_t>(nd) + 2;  // sign + NUL
   char* str = static_cast<char*>(std::malloc(total));
@@ -108,7 +131,7 @@ char* mpz_get_str_parallel(mpz_srcptr x, unsigned threads) {
   if (neg) mpz_neg(copy, copy);
 
   const unsigned max_depth = log2_floor(threads ? threads : 1);
-  convert_rec(Job{copy, nd, str + off, 0}, pow10, max_depth);
+  convert_rec(Job{copy, nd, str + off, 0}, pow10->values, max_depth);
   mpz_clear(copy);
 
   str[off + nd] = '\0';
@@ -124,6 +147,5 @@ char* mpz_get_str_parallel(mpz_srcptr x, unsigned threads) {
     str[off + digits] = '\0';
   }
 
-  for (unsigned i = 0; i <= kmax; ++i) mpz_clear(pow10[i]);
   return str;
 }
