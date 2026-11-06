@@ -276,9 +276,18 @@ void bs_parallel(Node& top, MulEngine& eng, ull N, ull leaf, unsigned t,
   pc.N = N;
   pc.leaf_total = (N + leaf - 1) / leaf;
   pc.prog = prog;
-  // span_min: enough leaf-chunks per task to make ~8t tasks (balance) but
-  // never so large that fewer than 2 tasks exist.
-  ull cpt = std::max<ull>(1, (pc.leaf_total + 8ull * t - 1) / (8ull * t));
+  // span_min: enough leaf-chunks per task to make several tasks per worker
+  // (balance) but never so large that fewer than 2 tasks exist. GPU-backed
+  // runs can tune this experimentally because device serialization changes
+  // the ideal task granularity.
+  ull tasks_per_thread = 8;
+  if (const char* e = std::getenv("TACHYON_TASKS_PER_THREAD")) {
+    const unsigned long v = std::strtoul(e, nullptr, 10);
+    if (v >= 2 && v <= 64) tasks_per_thread = v;
+  }
+  ull cpt = std::max<ull>(
+      1, (pc.leaf_total + tasks_per_thread * t - 1) /
+             (tasks_per_thread * t));
   ull span_min = leaf;
   while (span_min < cpt * leaf && span_min < N) span_min <<= 1;
   pc.span_min = span_min;

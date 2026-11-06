@@ -260,6 +260,14 @@ queue experiment regressed hybrid 100M from 18.22 s to 21.87 s, so FIFO remains
 the production scheduler. E5c still needs a cost-aware priority scheduler,
 not a simple queue-order swap.
 
+### E5c task-granularity sweep
+
+Added the opt-in `TACHYON_TASKS_PER_THREAD` scheduler knob. At 100M hybrid/T32,
+the measured medians were: factor 4 = 18.50 s, factor 8 = 18.35 s, factor
+16 = **17.77 s**, factor 32 = 19.32 s. The default remains factor 8 because
+factor 16 was not yet revalidated at 500M before resources were released; the
+result is retained as the next-session tuning lead, not a new record.
+
 ## Planned next
 
 - E5b: MEASURED after fixing a scheduler gate — `backend=hybrid` was accidentally
